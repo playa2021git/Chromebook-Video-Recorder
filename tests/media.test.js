@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {captureConstraints, stereoReady, formatTime, selectMime, mediaError} from '../media.js';
+import {acquireMedia, peakDecibels, captureConstraints, stereoReady, formatTime, selectMime, mediaError} from '../media.js';
 test('1080p と選択デバイスを厳密に指定し、音声処理を無効にする', () => {
   const {video, audio} = captureConstraints('usb-camera', 'usb-mic', '1920x1080', 'stereo');
   assert.deepEqual(video.width, {exact:1920}); assert.deepEqual(video.height, {exact:1080});
@@ -37,4 +37,44 @@ test('音声のみの制約エラーはカメラの解像度を案内しない',
   assert.doesNotMatch(mediaError({name:'OverconstrainedError'}, 'audio'), /720p/);
   assert.match(mediaError({name:'OverconstrainedError',constraint:'deviceId'}), /再検出/);
   assert.match(mediaError({name:'NotAllowedError'}), /Windows/);
+});
+
+test('1080p非対応なら選択デバイスと音声設定を保って720pへ自動調整', async () => {
+  const calls = [], stream = { id: '720p-stream' };
+  const result = await acquireMedia(async constraints => {
+    calls.push(constraints);
+    if (constraints.video.height.exact > 720) throw Object.assign(new Error('unsupported'), {name:'OverconstrainedError', constraint:'height'});
+    return stream;
+  }, 'usb-camera', 'usb-mic', '1920x1080', 'stereo');
+  assert.deepEqual(calls.map(c=>c.video.height.exact), [1080,720]);
+  assert.equal(result.stream,stream); assert.equal(result.quality,'1280x720'); assert.equal(result.requestedQuality,'1920x1080');
+  assert.deepEqual(calls[1].video.deviceId,{exact:'usb-camera'}); assert.deepEqual(calls[1].audio,calls[0].audio);
+});
+test('720pも非対応なら480p、対応する1080pはそのまま', async () => {
+  const calls=[];
+  const result=await acquireMedia(async constraints=>{
+    calls.push(constraints.video.height.exact);
+    if (constraints.video.height.exact>480) throw Object.assign(new Error(),{name:'OverconstrainedError'});
+    return {};
+  },'','','1920x1080','mono');
+  assert.deepEqual(calls,[1080,720,480]); assert.equal(result.quality,'640x480');
+  let count=0; await acquireMedia(async()=>{count++;return {};},'','','1920x1080','mono'); assert.equal(count,1);
+});
+test('権限拒否、デバイスID、音声設定の失敗では解像度を再試行しない',async()=>{
+  for(const error of [{name:'NotAllowedError'},{name:'NotReadableError'},{name:'OverconstrainedError',constraint:'deviceId'},{name:'OverconstrainedError',constraint:'channelCount'}]) {
+    let count=0;
+    await assert.rejects(acquireMedia(async()=>{count++;throw error;},'','','1920x1080','stereo'));
+    assert.equal(count,1);
+  }
+  let count=0;
+  await assert.rejects(acquireMedia(async()=>{count++;throw {name:'OverconstrainedError'};},'','','1920x1080','mono','audio'));
+  assert.equal(count,1);
+});
+test('LEDメーターは実際のピークからdBFSを計算する',()=>{
+  assert.equal(peakDecibels(new Float32Array([0,0])), -60);
+  assert.equal(peakDecibels(new Float32Array([1,-1])),0);
+  assert.ok(Math.abs(peakDecibels(new Float32Array([.5,-.5]))+6.02)<.01);
+  assert.ok(peakDecibels(new Float32Array([.1]))<-15);
+  assert.ok(peakDecibels(new Float32Array([.3]))>-15);
+  assert.ok(peakDecibels(new Float32Array([.9]))>-5);
 });

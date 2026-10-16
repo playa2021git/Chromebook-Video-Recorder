@@ -1,4 +1,4 @@
-import { captureConstraints, stereoReady, formatTime, selectMime, mediaError } from './media.js';
+import { acquireMedia, peakDecibels, stereoReady, formatTime, selectMime, mediaError } from './media.js';
 import { Mp3Recorder } from './mp3-recorder.js';
 const $ = id => document.getElementById(id);
 let sourceStream, outputStream, audioContext, audioBus, splitter, meterNodes = [], meterFrame, recorder;
@@ -35,6 +35,7 @@ function updateModeUI() {
   $('timer').textContent = '00:00';
 }
 function stopDevices() {
+  document.body.classList.remove('connected');
   cancelAnimationFrame(meterFrame);
   sourceStream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
   outputStream?.getTracks().forEach(track => track.stop());
@@ -44,7 +45,7 @@ function stopDevices() {
   meterNodes = [];
   $('preview').srcObject = null;
   $('audioPreview').hidden = true;
-  $('meterL').value = $('meterR').value = 0;
+  setMeter('L', -60); setMeter('R', -60);
   $('meterLabel').textContent = '待機中';
   $('actualVideo').textContent = isAudioOnly() ? '映像：使用しません' : '映像：未接続';
   $('actualAudio').textContent = '音声：未接続';
@@ -60,14 +61,24 @@ async function enumerateDevices() {
     if ([...select.options].some(option => option.value === chosen)) select.value = chosen;
   }
 }
+const meterLevels = { L: -60, R: -60 };
+function setMeter(channel, decibels) {
+  meterLevels[channel] = decibels;
+  const meter = $(`meter${channel}`);
+  const value = (decibels + 60) / 60;
+  meter.querySelectorAll('.led').forEach((led, index) => led.classList.toggle('lit', index < Math.ceil(value * 24)));
+  meter.setAttribute('aria-valuenow', String(Math.round(decibels)));
+  $(`meter${channel}Db`).textContent = decibels <= -60 ? '−∞' : decibels.toFixed(0);
+}
 function renderMeters() {
   let level = 0;
   meterNodes.forEach((node, index) => {
     const data = new Float32Array(node.fftSize);
     node.getFloatTimeDomainData(data);
-    const rms = Math.sqrt(data.reduce((sum, value) => sum + value * value, 0) / data.length);
-    const value = Math.min(1, rms * 4);
-    $(index === 0 ? 'meterL' : 'meterR').value = value;
+    const channel = index === 0 ? 'L' : 'R';
+    const decibels = Math.max(peakDecibels(data), meterLevels[channel] - 1.2);
+    const value = (decibels + 60) / 60;
+    setMeter(channel, decibels);
     level = Math.max(level, value);
   });
   if (isAudioOnly()) {
@@ -109,7 +120,15 @@ async function connect() {
   notify(`${isAudioOnly() ? 'マイク' : 'カメラとマイク'}に接続しています。確認画面が出たらアクセスを許可してください。`);
   stopDevices();
   try {
-    sourceStream = await navigator.mediaDevices.getUserMedia(captureConstraints($('camera').value, $('microphone').value, $('quality').value, mode, captureType));
+    const connection = await acquireMedia(constraints => navigator.mediaDevices.getUserMedia(constraints), $('camera').value, $('microphone').value, $('quality').value, mode, captureType);
+    sourceStream = connection.stream;
+    const adjusted = !isAudioOnly() && connection.quality !== connection.requestedQuality;
+    const adjustment = adjusted ? `${connection.requestedQuality.split('x')[1]}p 非対応のため ${connection.quality.split('x')[1]}p に自動調整しました。` : '';
+    if (!isAudioOnly()) {
+      $('quality').value = connection.quality;
+      $('qualityHint').textContent = adjustment || '非対応の解像度は自動調整。1080p → 720p → 480p の順で接続します。';
+      $('qualityHint').classList.toggle('adjusted', adjusted);
+    }
     const videoSettings = sourceStream.getVideoTracks()[0]?.getSettings();
     const audioSettings = sourceStream.getAudioTracks()[0].getSettings();
     await enumerateDevices();
@@ -119,6 +138,7 @@ async function connect() {
     if (isAudioOnly() && !audioContext.audioWorklet) throw new Error('このブラウザは MP3 録音に対応していません。最新の Chrome を使用してください。');
     if (!isAudioOnly()) { $('preview').srcObject = sourceStream; await $('preview').play(); }
     $('placeholder').hidden = true;
+    document.body.classList.add('connected');
     $('audioPreview').hidden = !isAudioOnly();
     $('previewStatus').textContent = isAudioOnly() ? '● マイク接続中 · カメラ不使用' : '● プレビュー中';
     $('actualVideo').textContent = isAudioOnly() ? '映像：使用しません' : `映像：${videoSettings.width} × ${videoSettings.height} · ${Math.round(videoSettings.frameRate || 0)} fps`;
@@ -126,9 +146,9 @@ async function connect() {
     $('resolutionBadge').textContent = isAudioOnly() ? 'MP3' : `${videoSettings.height}p`;
     $('meterLabel').textContent = '入力を確認';
     if (mode === 'stereo' && !stereoReady(audioSettings)) {
-      notify(`このマイクの入力はステレオ（2 ch）と確認できません。ステレオ${action()}は開始できません。対応する USB マイクを選ぶか、モノラルに切り替えてください。`, 'warning');
+      notify(`${adjustment}このマイクの入力はステレオ（2 ch）と確認できません。ステレオ${action()}は開始できません。対応する USB マイクを選ぶか、モノラルに切り替えてください。`, 'warning');
       $('actualAudio').textContent = `入力：${audioSettings.channelCount ?? '不明'} ch · ステレオ非対応`;
-    } else notify(`${action()}できます。${mode === 'stereo' ? 'ステレオ 2 ch' : 'モノラル 1 ch'}で${isAudioOnly() ? ' MP3 に' : ''}保存します。まずは短い試し撮りで確認してください。`);
+    } else notify(`${adjustment}${action()}できます。${mode === 'stereo' ? 'ステレオ 2 ch' : 'モノラル 1 ch'}で${isAudioOnly() ? ' MP3 に' : ''}保存します。まずは短い試し撮りで確認してください。`);
     sourceStream.getTracks().forEach(track => { track.onended = () => {
       disconnected = true;
       if (activeRecording()) stopRecording();

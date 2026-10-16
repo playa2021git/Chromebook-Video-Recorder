@@ -181,10 +181,64 @@ try {
   await monoInput.waitForFunction(()=>document.getElementById('notice').textContent.includes('ステレオ録画は開始できません'));
   assert.equal(await monoInput.locator('#recordButton').isDisabled(),true);
   await monoInput.locator('#mono').click(); await monoInput.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  // Release the earlier 1080p capture so Chromium's shared fake camera is native 720p.
+  await monoInput.close();
+  const limitedCamera=await browser.newPage();
+  await limitedCamera.addInitScript(()=>{
+    window.requestedHeights=[];
+    const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia=async constraints=>{
+      window.requestedHeights.push(constraints.video.height.exact);
+      if(constraints.video.height.exact>720)throw Object.assign(new DOMException('720p camera','OverconstrainedError'),{constraint:'height'});
+      return original(constraints);
+    };
+  });
+  await limitedCamera.goto('http://127.0.0.1:8765');await limitedCamera.locator('#connectButton').click();
+  await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  assert.deepEqual(await limitedCamera.evaluate(()=>window.requestedHeights),[1080,720]);
+  assert.equal(await limitedCamera.locator('#quality').inputValue(),'1280x720');
+  assert.match(await limitedCamera.locator('#actualVideo').textContent(),/1280 × 720/);
+  assert.match(await limitedCamera.locator('#qualityHint').textContent(),/720p に自動調整/);
+  assert.match(await limitedCamera.locator('#notice').textContent(),/720p に自動調整/);
+  assert.equal(await limitedCamera.locator('#placeholder').isVisible(),false);
+  for(const channel of ['L','R']){
+    assert.equal(await limitedCamera.locator(`#meter${channel} .green`).count(),18);
+    assert.equal(await limitedCamera.locator(`#meter${channel} .yellow`).count(),4);
+    assert.equal(await limitedCamera.locator(`#meter${channel} .red`).count(),2);
+  }
+  await limitedCamera.waitForFunction(()=>document.querySelectorAll('#meterL .lit').length>0);
+  await limitedCamera.locator('#recordButton').click(); await limitedCamera.waitForTimeout(1200);
+  await limitedCamera.locator('#recordButton').click();await limitedCamera.waitForSelector('.take video');
+  const fallbackDownload=limitedCamera.waitForEvent('download');await limitedCamera.getByRole('link',{name:'端末に保存'}).click();
+  const fallbackFile=join(directory,'auto-720p.webm');await (await fallbackDownload).saveAs(fallbackFile);
+  const fallbackProbe=JSON.parse(execFileSync('ffprobe',['-v','error','-show_streams','-of','json',fallbackFile],{encoding:'utf8'}));
+  assert.equal(fallbackProbe.streams.find(s=>s.codec_type==='video').height,720);
+  // Three signal strengths must illuminate green, then yellow, then red LEDs.
+  await limitedCamera.evaluate(async()=>{
+    const stream=document.getElementById('preview').srcObject;
+    const context=new AudioContext();const generator=context.createOscillator();const gain=context.createGain();const dest=context.createMediaStreamDestination();
+    generator.connect(gain);gain.connect(dest);generator.start();await context.resume();
+    window.meterTest={context,gain};
+    const original=AudioContext.prototype.createMediaStreamSource;
+    AudioContext.prototype.createMediaStreamSource=function(){return original.call(this,dest.stream);};
+    window.previousStream=stream;
+  });
+  await limitedCamera.locator('#mono').click();await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  for(const [gain,color] of [[.05,'green'],[.3,'yellow'],[.95,'red']]){
+    await limitedCamera.evaluate(value=>{window.meterTest.gain.gain.value=value;},gain);
+    await limitedCamera.waitForTimeout(900);
+    assert.ok(await limitedCamera.locator(`#meterL .${color}.lit`).count()>0);
+    if(color==='green')assert.equal(await limitedCamera.locator('#meterL .yellow.lit, #meterL .red.lit').count(),0);
+    if(color==='yellow')assert.equal(await limitedCamera.locator('#meterL .red.lit').count(),0);
+  }
+  await limitedCamera.evaluate(()=>window.meterTest.context.close());
+  await limitedCamera.setViewportSize({width:390,height:844});
+  assert.equal(await limitedCamera.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  console.log('PASS: automatic 1080p to 720p connection and encoded recording; actual quality synchronization; green/yellow/red LEDs respond to signal strength.');
   const unsupported=await browser.newPage();
   await unsupported.addInitScript(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('Resolution','OverconstrainedError');};});
   await unsupported.goto('http://127.0.0.1:8765'); await unsupported.locator('#connectButton').click();
-  await unsupported.waitForFunction(()=>document.getElementById('notice').textContent.includes('720p または 480p'));
+  await unsupported.waitForFunction(()=>document.getElementById('notice').textContent.includes('対応する解像度'));
   assert.equal(await unsupported.locator('#recordButton').isDisabled(),true);
   console.log('PASS: 1080p encoding; separate stereo tones; mono encoding; pause/resume; playback; local downloads; 720p/camera/mic switching; device disconnect recovery; mobile; help; permission/unsupported resolution errors; mono input protection.');
 } finally {

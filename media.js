@@ -19,8 +19,28 @@ export function mediaError(error, captureType = 'video') {
     NotAllowedError: `${device}へのアクセスが許可されていません。Chrome のアドレスバーのサイト設定で許可してください。Windows では OS のプライバシー設定と「デスクトップアプリ」のアクセス許可も確認してから再接続してください。`,
     NotFoundError: `${device}が見つかりません。接続を確認して再検出してください。`,
     NotReadableError: 'デバイスを開始できません。他の録画・通話アプリを閉じ、Windows のカメラ／マイクのアクセス許可も確認してから再接続してください。',
-    OverconstrainedError: captureType === 'audio' || (error.constraint && !['width', 'height', 'frameRate'].includes(error.constraint)) ? `選択した${device}の設定を使用できません。デバイスを再検出し、別の入力を選んで再接続してください（${error.constraint || '音声設定'}）。` : '選択したデバイスは、この解像度に対応していません。720p または 480p、別のデバイスを選んで再接続してください。',
+    OverconstrainedError: captureType === 'audio' || (error.constraint && !['width', 'height', 'aspectRatio', 'frameRate'].includes(error.constraint)) ? `選択した${device}の設定を使用できません。デバイスを再検出し、別の入力を選んで再接続してください（${error.constraint || '音声設定'}）。` : '対応する解像度（1080p / 720p / 480p）で接続できませんでした。別のカメラを選ぶか、デバイスを再接続してください。',
     SecurityError: 'ブラウザのセキュリティ設定でデバイスへのアクセスが制限されています。',
   };
   return messages[error.name] || `デバイスを開始できませんでした（${error.name || '不明なエラー'}）。接続とブラウザの対応状況を確認してください。`;
+}
+
+// Retry only unsupported video constraints; never retry permission or device errors.
+export async function acquireMedia(getUserMedia, camera, microphone, quality, mode, captureType = 'video') {
+  const qualities = ['1920x1080', '1280x720', '640x480'];
+  const candidates = captureType === 'audio' ? [quality] : qualities.slice(Math.max(0, qualities.indexOf(quality)));
+  for (const candidate of candidates) {
+    try {
+      const stream = await getUserMedia(captureConstraints(camera, microphone, candidate, mode, captureType));
+      return { stream, quality: candidate, requestedQuality: quality };
+    } catch (error) {
+      const videoConstraint = !error.constraint || ['width', 'height', 'aspectRatio', 'frameRate'].includes(error.constraint);
+      if (captureType === 'audio' || error.name !== 'OverconstrainedError' || !videoConstraint || candidate === candidates.at(-1)) throw error;
+    }
+  }
+}
+export function peakDecibels(samples) {
+  let peak = 0;
+  for (const sample of samples) peak = Math.max(peak, Math.abs(sample));
+  return peak ? Math.min(0, Math.max(-60, 20 * Math.log10(peak))) : -60;
 }
