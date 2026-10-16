@@ -11,9 +11,23 @@ cd /workspace/Chromebook-Video-Recorder
 python3 -m http.server 8000 --bind 0.0.0.0
 ```
 
-ローカル開発では `http://localhost:8000` を Chrome で開きます。Chromebook で直接試す場合は、このフォルダーを Chromebook の Linux 開発環境にコピーして同じコマンドを実行できます。Linux 環境がない Chromebook では、静的ホスティングに配置した **HTTPS** のサイトで使用してください。LAN 内の HTTP アドレスではカメラ権限を利用できません。公開・デプロイはこのリポジトリでは実施していません。
+ローカル開発では `http://localhost:8000` を Chrome で開きます。Chromebook で直接試す場合は、このフォルダーを Chromebook の Linux 開発環境にコピーして同じコマンドを実行できます。Linux 環境がない Chromebook では、静的ホスティングに配置した **HTTPS** のサイトで使用してください。LAN 内の HTTP アドレスではカメラ権限を利用できません。GitHub Pages の公開手順は下記を参照してください。
 
 `npm start` でも起動できます（Node.js と Python 3 が必要）。ビルドやアプリ実行用の npm 依存はありません。
+
+## GitHub Pages で公開する
+
+ビルド不要です。リポジトリの **Settings → Pages → Build and deployment** で次を設定します。
+
+1. Source: **Deploy from a branch**
+2. Branch: **main**、フォルダー: **/ (root)**
+3. **Save** を押し、GitHub のデプロイ完了を待つ
+
+公開後の URL： https://playa2021git.github.io/Chromebook-Video-Recorder/
+
+公開が完了すれば、Chromebook の Chrome から URL を開くだけで使えます。初回はカメラ・マイクの権限を許可してください。インストールや Linux 環境は不要です。HTTPS が提供されるのでカメラ API を利用できます。`.nojekyll` により静的ファイルをそのまま配信します。
+
+Pages を有効にするにはリポジトリの管理権限が必要です。リポジトリが非公開の場合は、GitHub のプランや組織ポリシーにより Pages を利用できない場合があります。リポジトリの公開範囲はこの作業では変更していません。
 
 ## 使い方
 
