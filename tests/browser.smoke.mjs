@@ -73,7 +73,7 @@ try {
   await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   assert.match(await page.locator('#actualVideo').textContent(),/1280 × 720/);
   await page.locator('#microphone').selectOption({index:1});
-  await page.waitForFunction(()=>{const video=document.getElementById('preview');return video.srcObject?.getAudioTracks()[0].getSettings().deviceId===document.getElementById('microphone').value && !document.getElementById('recordButton').disabled;});
+  await page.waitForFunction(()=>{const video=document.getElementById('preview');return video.srcObject?.getAudioTracks()[0]?.getSettings().deviceId===document.getElementById('microphone').value && !document.getElementById('recordButton').disabled;});
   await page.locator('#recordButton').click(); await page.waitForTimeout(1200);
   await page.locator('#preview').evaluate(video=>video.srcObject.getVideoTracks()[0].dispatchEvent(new Event('ended')));
   await page.waitForFunction(()=>document.querySelectorAll('.take').length===3);
@@ -188,8 +188,8 @@ try {
     window.requestedHeights=[];
     const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia=async constraints=>{
-      window.requestedHeights.push(constraints.video.height.exact);
-      if(constraints.video.height.exact>720)throw Object.assign(new DOMException('720p camera','OverconstrainedError'),{constraint:'height'});
+      if(constraints.video) window.requestedHeights.push(constraints.video.height.ideal);
+      if(constraints.video && constraints.video.height.ideal>720)throw Object.assign(new DOMException('720p camera','OverconstrainedError'),{constraint:'height'});
       return original(constraints);
     };
   });

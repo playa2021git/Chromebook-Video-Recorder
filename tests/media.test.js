@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {acquireMedia, peakDecibels, captureConstraints, stereoReady, formatTime, selectMime, mediaError} from '../media.js';
-test('1080p と選択デバイスを厳密に指定し、音声処理を無効にする', () => {
+test('希望解像度と選択デバイスを指定し、音声処理を無効にする', () => {
   const {video, audio} = captureConstraints('usb-camera', 'usb-mic', '1920x1080', 'stereo');
-  assert.deepEqual(video.width, {exact:1920}); assert.deepEqual(video.height, {exact:1080});
+  assert.deepEqual(video.width, {ideal:1920}); assert.deepEqual(video.height, {ideal:1080});
   assert.deepEqual(video.deviceId, {exact:'usb-camera'}); assert.deepEqual(audio.deviceId,{exact:'usb-mic'});
   assert.deepEqual(audio.channelCount,{ideal:2});
   assert.equal(audio.echoCancellation,false); assert.equal(audio.noiseSuppression,false); assert.equal(audio.autoGainControl,false);
@@ -11,7 +11,7 @@ test('1080p と選択デバイスを厳密に指定し、音声処理を無効�
 test('モノラルは1ch、初回はデバイス指定なし', () => {
   const {video,audio}=captureConstraints('', '', '1280x720','mono');
   assert.equal(video.deviceId,undefined); assert.equal(audio.deviceId,undefined);
-  assert.deepEqual(audio.channelCount,{ideal:1}); assert.deepEqual(video.height,{exact:720});
+  assert.deepEqual(audio.channelCount,{ideal:1}); assert.deepEqual(video.height,{ideal:720});
 });
 test('不明またはモノラル入力をステレオと誤認しない',()=>{
   assert.equal(stereoReady({}),false); assert.equal(stereoReady({channelCount:1}),false);
@@ -43,18 +43,18 @@ test('1080p非対応なら選択デバイスと音声設定を保って720pへ�
   const calls = [], stream = { id: '720p-stream' };
   const result = await acquireMedia(async constraints => {
     calls.push(constraints);
-    if (constraints.video.height.exact > 720) throw Object.assign(new Error('unsupported'), {name:'OverconstrainedError', constraint:'height'});
+    if (constraints.video.height.ideal > 720) throw Object.assign(new Error('unsupported'), {name:'OverconstrainedError', constraint:'height'});
     return stream;
   }, 'usb-camera', 'usb-mic', '1920x1080', 'stereo');
-  assert.deepEqual(calls.map(c=>c.video.height.exact), [1080,720]);
+  assert.deepEqual(calls.map(c=>c.video.height.ideal), [1080,720]);
   assert.equal(result.stream,stream); assert.equal(result.quality,'1280x720'); assert.equal(result.requestedQuality,'1920x1080');
   assert.deepEqual(calls[1].video.deviceId,{exact:'usb-camera'}); assert.deepEqual(calls[1].audio,calls[0].audio);
 });
 test('720pも非対応なら480p、対応する1080pはそのまま', async () => {
   const calls=[];
   const result=await acquireMedia(async constraints=>{
-    calls.push(constraints.video.height.exact);
-    if (constraints.video.height.exact>480) throw Object.assign(new Error(),{name:'OverconstrainedError'});
+    calls.push(constraints.video.height.ideal);
+    if (constraints.video.height.ideal>480) throw Object.assign(new Error(),{name:'OverconstrainedError'});
     return {};
   },'','','1920x1080','mono');
   assert.deepEqual(calls,[1080,720,480]); assert.equal(result.quality,'640x480');
@@ -77,4 +77,13 @@ test('LEDメーターは実際のピークからdBFSを計算する',()=>{
   assert.ok(peakDecibels(new Float32Array([.1]))<-15);
   assert.ok(peakDecibels(new Float32Array([.3]))>-15);
   assert.ok(peakDecibels(new Float32Array([.9]))>-5);
+});
+
+test('初回はFrontを優先し、解像度交渉で返った720pをそのまま採用する',async()=>{
+  const c=captureConstraints('', '', '1920x1080','mono');
+  assert.deepEqual(c.video.facingMode,{ideal:'user'});
+  assert.equal(captureConstraints('front-id','','1920x1080','mono').video.facingMode,undefined);
+  let calls=0;
+  const result=await acquireMedia(async()=>{calls++;return {getVideoTracks:()=>[{getSettings:()=>({width:1280,height:720})}]};},'','','1920x1080','mono');
+  assert.equal(calls,1); assert.equal(result.quality,'1280x720');
 });

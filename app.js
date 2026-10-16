@@ -1,9 +1,11 @@
 import { acquireMedia, peakDecibels, stereoReady, formatTime, selectMime, mediaError } from './media.js';
+import { waitFor, stopStream } from './connection.js';
 import { Mp3Recorder } from './mp3-recorder.js';
 const $ = id => document.getElementById(id);
-let sourceStream, outputStream, audioContext, audioBus, splitter, meterNodes = [], meterFrame, recorder;
+let sourceStream, outputStream, audioContext, audioBus, audioInput, audioDestination, splitter, meterNodes = [], meterFrame, recorder;
 let mode = 'stereo', captureType = 'video', busy = false, chunks = [], startedAt = 0, elapsed = 0, timerInterval, finishing = false;
 let recordingMeta, recordingError = false, disconnected = false;
+let connectionAttempt, enumerationVersion = 0;
 const takes = new Map();
 const controls = ['camera', 'microphone', 'quality'];
 const isAudioOnly = () => captureType === 'audio';
@@ -13,6 +15,8 @@ function activeRecording() { return recorder && recorder.state !== 'inactive'; }
 function updateControls() {
   const locked = busy || activeRecording() || finishing;
   $('settings').disabled = locked;
+  $('cancelConnectButton').hidden = !connectionAttempt;
+  $('reconnectButton').hidden = busy || !!sourceStream || activeRecording() || finishing;
   for (const id of ['refreshButton', 'connectButton', 'videoMode', 'audioMode']) $(id).disabled = locked;
   $('recordButton').disabled = busy || finishing || (!activeRecording() && (!sourceStream || (mode === 'stereo' && !stereoReady(sourceStream.getAudioTracks()[0]?.getSettings() || {}))));
 }
@@ -34,27 +38,41 @@ function updateModeUI() {
   $('recordState').textContent = `${action()}前`;
   $('timer').textContent = '00:00';
 }
-function stopDevices() {
-  document.body.classList.remove('connected');
+function detachPreview() {
+  const preview = $('preview');
+  preview.pause(); preview.srcObject = null; preview.load();
+}
+function stopAudioGraph() {
   cancelAnimationFrame(meterFrame);
-  sourceStream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
-  outputStream?.getTracks().forEach(track => track.stop());
-  sourceStream = outputStream = undefined;
-  if (audioContext) audioContext.close().catch(() => {});
-  audioContext = audioBus = undefined;
-  meterNodes = [];
-  $('preview').srcObject = null;
-  $('audioPreview').hidden = true;
+  audioInput?.disconnect(); audioBus?.disconnect(); splitter?.disconnect();
+  meterNodes.forEach(node => node.disconnect());
+  stopStream(audioDestination?.stream);
+  audioInput = audioBus = audioDestination = splitter = undefined; meterNodes = [];
   setMeter('L', -60); setMeter('R', -60);
+}
+function stopDevices() {
+  enumerationVersion++;
+  document.body.classList.remove('connected');
+  detachPreview();
+  stopStream(sourceStream); stopStream(outputStream);
+  sourceStream = outputStream = undefined;
+  stopAudioGraph();
+  if (audioContext) audioContext.close().catch(() => {});
+  audioContext = undefined;
+  $('audioPreview').hidden = true;
   $('meterLabel').textContent = '待機中';
   $('actualVideo').textContent = isAudioOnly() ? '映像：使用しません' : '映像：未接続';
   $('actualAudio').textContent = '音声：未接続';
   $('resolutionBadge').textContent = isAudioOnly() ? 'MP3' : 'PREVIEW';
 }
 async function enumerateDevices() {
-  const devices = await navigator.mediaDevices.enumerateDevices();
+  const version = ++enumerationVersion, stream = sourceStream;
+  const devices = await waitFor(navigator.mediaDevices.enumerateDevices(), { timeout: 3000, label: 'デバイス一覧' });
+  if (version !== enumerationVersion || stream !== sourceStream) return;
   for (const [id, kind, prefix] of [['camera', 'videoinput', 'カメラ'], ['microphone', 'audioinput', 'マイク']]) {
-    const select = $(id), chosen = select.value;
+    const select = $(id);
+    const track = kind === 'videoinput' ? stream?.getVideoTracks()[0] : stream?.getAudioTracks()[0];
+    const chosen = track?.getSettings().deviceId || select.value;
     select.replaceChildren();
     devices.filter(device => device.kind === kind).forEach((device, index) => select.add(new Option(device.label || `${prefix} ${index + 1}`, device.deviceId)));
     if (!select.options.length) select.add(new Option(`${prefix}が見つかりません`, ''));
@@ -87,28 +105,25 @@ function renderMeters() {
   }
   meterFrame = requestAnimationFrame(renderMeters);
 }
-async function buildAudio() {
-  audioContext = new AudioContext({ sampleRate: 48000 });
-  await audioContext.resume();
-  const input = audioContext.createMediaStreamSource(new MediaStream(sourceStream.getAudioTracks()));
-  // Explicit speaker mixing preserves stereo and downmixes mono before either encoder.
+function buildAudio() {
+  stopAudioGraph();
+  audioInput = audioContext.createMediaStreamSource(new MediaStream(sourceStream.getAudioTracks()));
   audioBus = audioContext.createGain();
   audioBus.channelCount = mode === 'stereo' ? 2 : 1;
   audioBus.channelCountMode = 'explicit'; audioBus.channelInterpretation = 'speakers';
-  input.connect(audioBus);
-  const destination = audioContext.createMediaStreamDestination();
-  destination.channelCount = audioBus.channelCount;
-  destination.channelCountMode = 'explicit'; destination.channelInterpretation = 'speakers';
-  audioBus.connect(destination);
-  splitter = audioContext.createChannelSplitter(2); input.connect(splitter);
+  audioInput.connect(audioBus);
+  audioDestination = audioContext.createMediaStreamDestination();
+  audioDestination.channelCount = audioBus.channelCount;
+  audioDestination.channelCountMode = 'explicit'; audioDestination.channelInterpretation = 'speakers';
+  audioBus.connect(audioDestination);
+  splitter = audioContext.createChannelSplitter(2); audioInput.connect(splitter);
   meterNodes = [0, 1].map(channel => {
     const analyser = audioContext.createAnalyser(); analyser.fftSize = 1024;
     splitter.connect(analyser, channel); return analyser;
   });
-  outputStream = new MediaStream([...sourceStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
   renderMeters();
 }
-async function connect() {
+async function connect(reason = 'all') {
   if (busy || activeRecording() || finishing) return;
   if (!isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     notify('カメラ・マイクを使うには HTTPS（開発時は localhost）で、Chrome から開いてください。', 'error'); return;
@@ -116,29 +131,68 @@ async function connect() {
   if (!window.AudioContext || (!isAudioOnly() && !window.MediaRecorder)) {
     notify('このブラウザは収録に対応していません。最新の Chrome を使用してください。', 'error'); return;
   }
-  busy = true; updateControls(); disconnected = false;
-  notify(`${isAudioOnly() ? 'マイク' : 'カメラとマイク'}に接続しています。確認画面が出たらアクセスを許可してください。`);
-  stopDevices();
+  const controller = new AbortController(), { signal } = controller;
+  const timeout = setTimeout(() => controller.abort(new DOMException('接続が 20 秒以内に完了しませんでした。権限とデバイスを確認し、再接続してください。', 'TimeoutError')), 20000);
+  connectionAttempt = controller; enumerationVersion++;
+  busy = true; disconnected = false; updateControls();
+  const camera = $('camera').value, microphone = $('microphone').value, quality = $('quality').value;
+  let stage = '音声の準備';
   try {
-    const connection = await acquireMedia(constraints => navigator.mediaDevices.getUserMedia(constraints), $('camera').value, $('microphone').value, $('quality').value, mode, captureType);
-    sourceStream = connection.stream;
-    const adjusted = !isAudioOnly() && connection.quality !== connection.requestedQuality;
-    const adjustment = adjusted ? `${connection.requestedQuality.split('x')[1]}p 非対応のため ${connection.quality.split('x')[1]}p に自動調整しました。` : '';
-    if (!isAudioOnly()) {
-      $('quality').value = connection.quality;
-      $('qualityHint').textContent = adjustment || '非対応の解像度は自動調整。1080p → 720p → 480p の順で接続します。';
-      $('qualityHint').classList.toggle('adjusted', adjusted);
+    // Invoke resume in the original click/change gesture, before permission/driver awaits.
+    if (!audioContext || audioContext.state === 'closed') audioContext = new AudioContext({ sampleRate: 48000 });
+    const audioReady = audioContext.state === 'running' ? Promise.resolve() : audioContext.resume();
+    audioReady.catch(() => {});
+    const retained = sourceStream;
+    const needVideo = !isAudioOnly() && (reason !== 'audio' || !retained?.getVideoTracks().some(track => track.readyState === 'live'));
+    const needAudio = reason !== 'video' || !retained?.getAudioTracks().some(track => track.readyState === 'live');
+    if (needVideo) detachPreview();
+    if (needAudio) stopAudioGraph();
+    if (!sourceStream) sourceStream = new MediaStream();
+    for (const track of sourceStream.getTracks()) {
+      if ((needVideo && track.kind === 'video') || (needAudio && track.kind === 'audio')) {
+        track.onended = null; track.stop(); sourceStream.removeTrack(track);
+      }
     }
+    document.body.classList.remove('connected');
+    stage = needVideo && needAudio ? 'カメラ・マイク' : needVideo ? 'カメラ切替' : 'マイク切替';
+    $('previewStatus').textContent = `${stage}に接続中…`;
+    notify(`${stage}に接続しています。権限の確認画面が出たら許可してください。応答がない場合はキャンセルできます。`);
+    const connection = await acquireMedia(async constraints => {
+      if (!needAudio) constraints.audio = false;
+      if (!needVideo) constraints.video = false;
+      const request = () => waitFor(navigator.mediaDevices.getUserMedia(constraints), { signal, onLate: stopStream });
+      try { return await request(); }
+      catch (error) {
+        if (!needVideo || needAudio || error.name !== 'NotReadableError' || signal.aborted) throw error;
+        // Some mobile/Windows drivers release Front/Back camera hardware asynchronously.
+        notify('前のカメラの解放を待って、切替を再試行しています…');
+        await waitFor(new Promise(resolve => setTimeout(resolve, 250)), { signal });
+        return request();
+      }
+    }, camera, microphone, quality, mode, needVideo ? 'video' : 'audio');
+    // An aborted attempt must never attach a late camera/microphone to the page.
+    if (signal.aborted) { stopStream(connection.stream); throw signal.reason; }
+    connection.stream.getTracks().forEach(track => sourceStream.addTrack(track));
+    stage = '音声の開始'; $('previewStatus').textContent = `${stage}…`;
+    await waitFor(audioReady, { signal, timeout: 3000, label: '音声の開始' });
+    if (needAudio || !audioDestination) buildAudio();
+    outputStream = new MediaStream([...sourceStream.getVideoTracks(), ...audioDestination.stream.getAudioTracks()]);
+    if (isAudioOnly() && !audioContext.audioWorklet) throw new Error('このブラウザは MP3 録音に対応していません。最新の Chrome を使用してください。');
     const videoSettings = sourceStream.getVideoTracks()[0]?.getSettings();
     const audioSettings = sourceStream.getAudioTracks()[0].getSettings();
-    await enumerateDevices();
-    if (videoSettings?.deviceId) $('camera').value = videoSettings.deviceId;
-    if (audioSettings.deviceId) $('microphone').value = audioSettings.deviceId;
-    await buildAudio();
-    if (isAudioOnly() && !audioContext.audioWorklet) throw new Error('このブラウザは MP3 録音に対応していません。最新の Chrome を使用してください。');
-    if (!isAudioOnly()) { $('preview').srcObject = sourceStream; await $('preview').play(); }
-    $('placeholder').hidden = true;
-    document.body.classList.add('connected');
+    const actualQuality = videoSettings ? `${videoSettings.width}x${videoSettings.height}` : quality;
+    const adjusted = !isAudioOnly() && actualQuality !== quality;
+    const adjustment = adjusted ? `${quality.split('x')[1]}p から ${videoSettings.height}p に自動調整しました。` : '';
+    if (!isAudioOnly()) {
+      if (![...$('quality').options].some(option => option.value === actualQuality)) $('quality').add(new Option(`${videoSettings.height}p · ${videoSettings.width} × ${videoSettings.height}（自動）`, actualQuality));
+      $('quality').value = actualQuality;
+      $('qualityHint').textContent = adjustment || 'カメラが対応する解像度へ自動調整します。';
+      $('qualityHint').classList.toggle('adjusted', adjusted);
+      stage = '映像の開始'; $('previewStatus').textContent = `${stage}…`;
+      if ($('preview').srcObject !== sourceStream) $('preview').srcObject = sourceStream;
+      await waitFor($('preview').play(), { signal, timeout: 5000, label: '映像の開始' });
+    }
+    $('placeholder').hidden = true; document.body.classList.add('connected');
     $('audioPreview').hidden = !isAudioOnly();
     $('previewStatus').textContent = isAudioOnly() ? '● マイク接続中 · カメラ不使用' : '● プレビュー中';
     $('actualVideo').textContent = isAudioOnly() ? '映像：使用しません' : `映像：${videoSettings.width} × ${videoSettings.height} · ${Math.round(videoSettings.frameRate || 0)} fps`;
@@ -151,19 +205,24 @@ async function connect() {
     } else notify(`${adjustment}${action()}できます。${mode === 'stereo' ? 'ステレオ 2 ch' : 'モノラル 1 ch'}で${isAudioOnly() ? ' MP3 に' : ''}保存します。まずは短い試し撮りで確認してください。`);
     sourceStream.getTracks().forEach(track => { track.onended = () => {
       disconnected = true;
+      if (connectionAttempt) connectionAttempt.abort(new DOMException('デバイスが切断されました。', 'NotReadableError'));
       if (activeRecording()) stopRecording();
-      // Keep the audio context alive until the worklet flushes its final PCM block.
       if (!finishing) { stopDevices(); $('placeholder').hidden = false; }
       $('previewStatus').textContent = 'デバイスが切断されました';
       notify('デバイスが切断されました。収録中のデータは停止して一覧に残します。デバイスを再接続してください。', 'error'); updateControls();
     }; });
+    // Device enumeration is optional metadata; never hold preview/controls hostage to it.
+    enumerateDevices().catch(() => {});
   } catch (error) {
     stopDevices(); $('placeholder').hidden = false;
-    $('previewStatus').textContent = '接続できませんでした';
-    // Even after a failed resolution request, expose available devices for recovery.
-    await enumerateDevices().catch(() => {});
-    notify(error.name === 'Error' ? error.message : mediaError(error, captureType), 'error');
-  } finally { busy = false; updateControls(); }
+    $('previewStatus').textContent = error.name === 'AbortError' ? '接続をキャンセルしました' : `${stage}で接続できませんでした`;
+    notify(`${error.name === 'Error' ? error.message : mediaError(error, captureType)}${error.name === 'AbortError' ? '' : `（${stage} / ${error.name}）`}`, error.name === 'AbortError' ? '' : 'error');
+    enumerateDevices().catch(() => {});
+  } finally {
+    clearTimeout(timeout);
+    if (connectionAttempt === controller) connectionAttempt = undefined;
+    busy = false; updateControls();
+  }
 }
 function updateTimer() {
   const seconds = (elapsed + (recorder?.state === 'recording' ? performance.now() - startedAt : 0)) / 1000;
@@ -174,7 +233,7 @@ async function startRecording() {
   if (mode === 'stereo' && !stereoReady(sourceStream.getAudioTracks()[0].getSettings())) return;
   busy = true; updateControls();
   try {
-    await audioContext.resume();
+    await waitFor(audioContext.resume(), { timeout: 3000, label: '音声の開始' });
     if (isAudioOnly()) recorder = await Mp3Recorder.create(audioContext, audioBus, mode === 'stereo' ? 2 : 1);
     else {
       const mimeType = selectMime(type => MediaRecorder.isTypeSupported(type));
@@ -245,8 +304,10 @@ function addTake(blob, meta, duration) {
   actions.append(save, remove); info.append(title, details, actions, saved); item.append(playback, info);
   $('recordingsList').prepend(item); $('recordingsSection').hidden = false; takes.set(url, blob);
 }
-$('connectButton').addEventListener('click', connect);
-controls.forEach(id => $(id).addEventListener('change', () => { if (sourceStream) connect(); }));
+$('connectButton').addEventListener('click', () => connect());
+$('reconnectButton').addEventListener('click', () => connect());
+$('cancelConnectButton').addEventListener('click', () => connectionAttempt?.abort(new DOMException('接続をキャンセルしました。', 'AbortError')));
+controls.forEach(id => $(id).addEventListener('change', () => { if (sourceStream) connect(id === 'microphone' ? 'audio' : 'video'); }));
 for (const type of ['video', 'audio']) $(`${type}Mode`).addEventListener('click', () => {
   if (captureType === type || busy || activeRecording() || finishing) return;
   captureType = type; stopDevices();
@@ -258,7 +319,7 @@ for (const nextMode of ['stereo', 'mono']) $(nextMode).addEventListener('click',
   mode = nextMode;
   for (const id of ['stereo', 'mono']) { $(id).classList.toggle('selected', id === mode); $(id).setAttribute('aria-pressed', String(id === mode)); }
   $('modeHint').textContent = mode === 'stereo' ? '左右の音を分けて録音。USB ステレオマイクにおすすめ。' : '左右の音を 1 チャンネルにまとめて録音。声の録音におすすめ。';
-  if (sourceStream) connect();
+  if (sourceStream) connect('audio');
 });
 $('refreshButton').addEventListener('click', async () => { try { await enumerateDevices(); notify('デバイス一覧を更新しました。使用する入力を選んでください。'); } catch (error) { notify(mediaError(error, captureType), 'error'); } });
 $('recordButton').addEventListener('click', () => activeRecording() ? stopRecording() : startRecording());
@@ -278,5 +339,5 @@ navigator.mediaDevices?.addEventListener('devicechange', () => { if (!busy && !a
 window.addEventListener('beforeunload', event => {
   if (activeRecording() || finishing || takes.size) { event.preventDefault(); event.returnValue = ''; }
 });
-window.addEventListener('pagehide', () => { if (activeRecording()) recorder.stop(); stopDevices(); });
+window.addEventListener('pagehide', () => { connectionAttempt?.abort(new DOMException('ページを閉じました。', 'AbortError'));  if (activeRecording()) recorder.stop(); stopDevices(); });
 if (!isSecureContext || !navigator.mediaDevices?.getUserMedia) notify('カメラ・マイクを使うには HTTPS（開発時は localhost）で、Chrome から開いてください。', 'error');
