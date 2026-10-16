@@ -82,6 +82,93 @@ try {
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.locator('#helpButton').click(); assert.equal(await page.locator('#helpDialog').isVisible(),true); await page.locator('#closeHelp').click();
   assert.deepEqual(errors,[]);
+  // Audio-only must work even when every camera request is rejected.
+  const audioPage = await browser.newPage({viewport:{width:1366,height:900},acceptDownloads:true});
+  audioPage.on('pageerror',error=>errors.push(error.message));
+  await audioPage.addInitScript(()=>{
+    window.captureRequests=[]; window.captureStreams=[];
+    const getUserMedia=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia=constraints=>{
+      window.captureRequests.push(constraints);
+      if(constraints.video!==false) return Promise.reject(new DOMException('Camera blocked','NotAllowedError'));
+      return getUserMedia(constraints).then(stream=>{window.captureStreams.push(stream); return stream;});
+    };
+  });
+  await audioPage.goto('http://127.0.0.1:8765');
+  await audioPage.locator('#audioMode').click(); await audioPage.locator('#connectButton').click();
+  await audioPage.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  assert.equal(await audioPage.locator('#videoSettings').isVisible(),false);
+  assert.match(await audioPage.locator('#actualVideo').textContent(),/使用しません/);
+  assert.equal(await audioPage.evaluate(()=>document.getElementById('preview').srcObject),null);
+  for (const mode of ['stereo','mono']) {
+    if(mode==='mono'){
+      await audioPage.locator('#mono').click();
+      await audioPage.waitForFunction(()=>document.getElementById('actualAudio').textContent.includes('録音：1 ch'));
+    }
+    await audioPage.locator('#recordButton').click();
+    await audioPage.waitForFunction(()=>document.getElementById('recordState').textContent==='録音中');
+    assert.equal(await audioPage.locator('#videoMode').isDisabled(),true);
+    await audioPage.waitForTimeout(1600); await audioPage.locator('#pauseButton').click();
+    const paused=await audioPage.locator('#timer').textContent(); await audioPage.waitForTimeout(1100);
+    assert.equal(await audioPage.locator('#timer').textContent(),paused);
+    await audioPage.locator('#pauseButton').click(); await audioPage.waitForTimeout(800);
+    await audioPage.locator('#recordButton').click();
+    await audioPage.waitForFunction(count=>document.querySelectorAll('.take audio').length===count,mode==='stereo'?1:2);
+    const player=audioPage.locator('.take audio').first(); await player.evaluate(audio=>audio.play());
+    await audioPage.waitForFunction(()=>document.querySelector('.take audio').currentTime>0);
+    const download=audioPage.waitForEvent('download'); await audioPage.getByRole('link',{name:'端末に保存'}).first().click();
+    const downloaded=await download; assert.match(downloaded.suggestedFilename(),/\.mp3$/);
+    const file=join(directory,`${mode}.mp3`); await downloaded.saveAs(file);
+    const probe=JSON.parse(execFileSync('ffprobe',['-v','error','-show_streams','-show_format','-of','json',file],{encoding:'utf8'}));
+    assert.equal(probe.streams.length,1); assert.equal(probe.streams[0].codec_name,'mp3');
+    assert.equal(probe.streams[0].channels,mode==='stereo'?2:1);
+    assert.equal(probe.streams[0].sample_rate,'48000');
+    assert.ok(Number(probe.format.duration)>2 && Number(probe.format.duration)<3,'MP3 duration excludes pause');
+    const raw=execFileSync('ffmpeg',['-v','error','-i',file,'-f','f32le','-acodec','pcm_f32le','-ar',String(rate),'-'],{maxBuffer:10*1024*1024});
+    function amplitude(channel,frequency) {
+      const count=mode==='stereo'?2:1; let real=0,imaginary=0;
+      const samples=Math.min(rate,Math.floor(raw.length/(4*count)));
+      for(let i=0;i<samples;i++){const value=raw.readFloatLE((i*count+channel)*4),angle=2*Math.PI*frequency*i/rate;real+=value*Math.cos(angle);imaginary+=value*Math.sin(angle);}
+      return Math.hypot(real,imaginary)/samples;
+    }
+    if(mode==='stereo'){
+      assert.ok(amplitude(0,440)>amplitude(0,880)*10,'MP3 left remains separate');
+      assert.ok(amplitude(1,880)>amplitude(1,440)*10,'MP3 right remains separate');
+    } else assert.ok(amplitude(0,440)>0.01 || amplitude(0,880)>0.01,'mono MP3 is not silent');
+    await player.evaluate(audio=>audio.pause());
+  }
+  assert.ok(await audioPage.evaluate(()=>window.captureRequests.length>=2&&window.captureRequests.every(c=>c.video===false)));
+  await audioPage.setViewportSize({width:390,height:844});
+  assert.equal(await audioPage.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await audioPage.screenshot({path:join(directory,'audio-mobile.png'),fullPage:true});
+  // A second recording must still flush when a microphone is unplugged.
+  await audioPage.locator('#recordButton').click();
+  await audioPage.waitForFunction(()=>document.getElementById('recordState').textContent==='録音中');
+  await audioPage.waitForTimeout(1200);
+  await audioPage.evaluate(()=>window.captureStreams.at(-1).getAudioTracks()[0].dispatchEvent(new Event('ended')));
+  await audioPage.waitForFunction(()=>document.querySelectorAll('.take audio').length===3);
+  assert.equal(await audioPage.locator('#recordButton').isDisabled(),true);
+  assert.ok(await audioPage.evaluate(()=>window.captureStreams.every(stream=>stream.getTracks().every(track=>track.readyState==='ended'))));
+  await audioPage.locator('#videoMode').click();
+  assert.equal(await audioPage.locator('#audioPreview').isVisible(),false);
+  assert.equal(await audioPage.locator('#recordButton').isDisabled(),true);
+  assert.equal(await audioPage.locator('.take audio').count(),3);
+  assert.deepEqual(errors,[]);
+  const switching=await browser.newPage();
+  await switching.goto('http://127.0.0.1:8765'); await switching.locator('#connectButton').click();
+  await switching.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  await switching.evaluate(()=>{window.previousCamera=document.getElementById('preview').srcObject;});
+  await switching.locator('#audioMode').click();
+  assert.ok(await switching.evaluate(()=>window.previousCamera.getTracks().every(track=>track.readyState==='ended')));
+  const brokenEncoder=await browser.newPage();
+  await brokenEncoder.route('**/mp3-worker.js',route=>route.abort());
+  await brokenEncoder.goto('http://127.0.0.1:8765'); await brokenEncoder.locator('#audioMode').click(); await brokenEncoder.locator('#connectButton').click();
+  await brokenEncoder.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  await brokenEncoder.locator('#recordButton').click();
+  await brokenEncoder.waitForFunction(()=>document.getElementById('notice').textContent.includes('MP3 エンコーダーを読み込めません'));
+  assert.equal(await brokenEncoder.locator('#audioMode').isDisabled(),false);
+  assert.equal(await brokenEncoder.locator('.take').count(),0);
+  console.log('PASS: MP3 stereo/mono encoding, separate L/R signals, pause duration, playback, download, no camera permission, mode locks, repeat recording, mobile and mode switching.');
   // Real browser error states with deterministic rejected device requests.
   const failure=await browser.newPage();
   await failure.addInitScript(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('Denied','NotAllowedError');};});

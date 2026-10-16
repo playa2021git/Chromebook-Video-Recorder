@@ -26,3 +26,15 @@ test('対応コーデックへフォールバックし、非対応を検出',()=
 test('解像度エラーと権限エラーの対処を表示',()=>{
   assert.match(mediaError({name:'OverconstrainedError'}),/720p/); assert.match(mediaError({name:'NotAllowedError'}),/許可/);
 });
+
+test('録音のみはカメラを要求せず、ステレオの音声設定を維持する', () => {
+  const { video, audio } = captureConstraints('unavailable-camera', 'usb-mic', '1920x1080', 'stereo', 'audio');
+  assert.equal(video, false);
+  assert.deepEqual(audio.deviceId, {exact:'usb-mic'});
+  assert.deepEqual(audio.channelCount, {ideal:2});
+});
+test('音声のみの制約エラーはカメラの解像度を案内しない', () => {
+  assert.doesNotMatch(mediaError({name:'OverconstrainedError'}, 'audio'), /720p/);
+  assert.match(mediaError({name:'OverconstrainedError',constraint:'deviceId'}), /再検出/);
+  assert.match(mediaError({name:'NotAllowedError'}), /Windows/);
+});

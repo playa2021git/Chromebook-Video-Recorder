@@ -1,7 +1,7 @@
-export function captureConstraints(camera, microphone, quality, mode) {
+export function captureConstraints(camera, microphone, quality, mode, captureType = 'video') {
   const [width, height] = quality.split('x').map(Number);
   return {
-    video: { ...(camera ? { deviceId: { exact: camera } } : {}), width: { exact: width }, height: { exact: height }, frameRate: { ideal: 30 } },
+    video: captureType === 'audio' ? false : { ...(camera ? { deviceId: { exact: camera } } : {}), width: { exact: width }, height: { exact: height }, frameRate: { ideal: 30 } },
     audio: { ...(microphone ? { deviceId: { exact: microphone } } : {}), channelCount: { ideal: mode === 'stereo' ? 2 : 1 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
   };
 }
@@ -13,12 +13,13 @@ export function formatTime(seconds) {
 export function selectMime(isSupported) {
   return ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(isSupported);
 }
-export function mediaError(error) {
+export function mediaError(error, captureType = 'video') {
+  const device = captureType === 'audio' ? 'マイク' : 'カメラ・マイク';
   const messages = {
-    NotAllowedError: 'カメラ・マイクへのアクセスが許可されていません。アドレスバーのサイト設定で許可してから、再接続してください。',
-    NotFoundError: 'カメラまたはマイクが見つかりません。接続を確認して再検出してください。',
-    NotReadableError: 'デバイスを開始できません。他のカメラアプリを閉じてから再接続してください。',
-    OverconstrainedError: '選択したデバイスは、この解像度に対応していません。720p または 480p、別のデバイスを選んで再接続してください。',
+    NotAllowedError: `${device}へのアクセスが許可されていません。Chrome のアドレスバーのサイト設定で許可してください。Windows では OS のプライバシー設定と「デスクトップアプリ」のアクセス許可も確認してから再接続してください。`,
+    NotFoundError: `${device}が見つかりません。接続を確認して再検出してください。`,
+    NotReadableError: 'デバイスを開始できません。他の録画・通話アプリを閉じ、Windows のカメラ／マイクのアクセス許可も確認してから再接続してください。',
+    OverconstrainedError: captureType === 'audio' || (error.constraint && !['width', 'height', 'frameRate'].includes(error.constraint)) ? `選択した${device}の設定を使用できません。デバイスを再検出し、別の入力を選んで再接続してください（${error.constraint || '音声設定'}）。` : '選択したデバイスは、この解像度に対応していません。720p または 480p、別のデバイスを選んで再接続してください。',
     SecurityError: 'ブラウザのセキュリティ設定でデバイスへのアクセスが制限されています。',
   };
   return messages[error.name] || `デバイスを開始できませんでした（${error.name || '不明なエラー'}）。接続とブラウザの対応状況を確認してください。`;
