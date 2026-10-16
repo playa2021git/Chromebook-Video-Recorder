@@ -97,6 +97,7 @@ function renderMeters() {
     const decibels = Math.max(peakDecibels(data), meterLevels[channel] - 1.2);
     const value = (decibels + 60) / 60;
     setMeter(channel, decibels);
+    if (mode === 'mono') setMeter('R', decibels);
     level = Math.max(level, value);
   });
   if (isAudioOnly()) {
@@ -116,8 +117,9 @@ function buildAudio() {
   audioDestination.channelCount = audioBus.channelCount;
   audioDestination.channelCountMode = 'explicit'; audioDestination.channelInterpretation = 'speakers';
   audioBus.connect(audioDestination);
-  splitter = audioContext.createChannelSplitter(2); audioInput.connect(splitter);
-  meterNodes = [0, 1].map(channel => {
+  // Monitor the same post-mix signal sent to the recording encoders.
+  splitter = audioContext.createChannelSplitter(2); audioBus.connect(splitter);
+  meterNodes = (mode === 'mono' ? [0] : [0, 1]).map(channel => {
     const analyser = audioContext.createAnalyser(); analyser.fftSize = 1024;
     splitter.connect(analyser, channel); return analyser;
   });
@@ -198,7 +200,8 @@ async function connect(reason = 'all') {
     $('actualVideo').textContent = isAudioOnly() ? '映像：使用しません' : `映像：${videoSettings.width} × ${videoSettings.height} · ${Math.round(videoSettings.frameRate || 0)} fps`;
     $('actualAudio').textContent = `入力：${audioSettings.channelCount ?? '不明'} ch · 録音：${mode === 'stereo' ? '2 ch' : '1 ch'}`;
     $('resolutionBadge').textContent = isAudioOnly() ? 'MP3' : `${videoSettings.height}p`;
-    $('meterLabel').textContent = '入力を確認';
+    $('meterLabel').textContent = mode === 'mono' ? 'MONO · L/R 共通' : 'STEREO · 左右独立';
+    $('meterHint').textContent = mode === 'mono' ? 'モノラルにまとめた音を L/R に同じ値で表示します。保存される音声は 1ch です。' : '録音される左右の音量を個別に表示します。入力音が左右同じなら、メーターも同じ動きになります。';
     if (mode === 'stereo' && !stereoReady(audioSettings)) {
       notify(`${adjustment}このマイクの入力はステレオ（2 ch）と確認できません。ステレオ${action()}は開始できません。対応する USB マイクを選ぶか、モノラルに切り替えてください。`, 'warning');
       $('actualAudio').textContent = `入力：${audioSettings.channelCount ?? '不明'} ch · ステレオ非対応`;

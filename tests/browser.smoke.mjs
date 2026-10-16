@@ -216,22 +216,41 @@ try {
   // Three signal strengths must illuminate green, then yellow, then red LEDs.
   await limitedCamera.evaluate(async()=>{
     const stream=document.getElementById('preview').srcObject;
-    const context=new AudioContext();const generator=context.createOscillator();const gain=context.createGain();const dest=context.createMediaStreamDestination();
-    generator.connect(gain);gain.connect(dest);generator.start();await context.resume();
-    window.meterTest={context,gain};
+    const context=new AudioContext();const generator=context.createOscillator();const gain=context.createGain();const right=context.createGain();const merger=context.createChannelMerger(2);const dest=context.createMediaStreamDestination();
+    generator.connect(gain);generator.connect(right);gain.connect(merger,0,0);right.connect(merger,0,1);merger.connect(dest);generator.start();await context.resume();
+    window.meterTest={context,gain,right};
     const original=AudioContext.prototype.createMediaStreamSource;
     AudioContext.prototype.createMediaStreamSource=function(){return original.call(this,dest.stream);};
     window.previousStream=stream;
   });
   await limitedCamera.locator('#mono').click();await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   for(const [gain,color] of [[.05,'green'],[.3,'yellow'],[.95,'red']]){
-    await limitedCamera.evaluate(value=>{window.meterTest.gain.gain.value=value;},gain);
+    await limitedCamera.evaluate(value=>{window.meterTest.gain.gain.value=value;window.meterTest.right.gain.value=value;},gain);
     await limitedCamera.waitForTimeout(900);
     assert.ok(await limitedCamera.locator(`#meterL .${color}.lit`).count()>0);
     if(color==='green')assert.equal(await limitedCamera.locator('#meterL .yellow.lit, #meterL .red.lit').count(),0);
     if(color==='yellow')assert.equal(await limitedCamera.locator('#meterL .red.lit').count(),0);
   }
+  const levels=()=>limitedCamera.evaluate(()=>['L','R'].map(c=>Number(document.getElementById(`meter${c}`).getAttribute('aria-valuenow'))));
+  await limitedCamera.evaluate(()=>{window.meterTest.gain.gain.value=.15;window.meterTest.right.gain.value=.75;});
+  await limitedCamera.waitForTimeout(600);
+  let [left,right]=await levels();assert.equal(left,right,'mono shows the same single measurement on L/R');
+  assert.ok(Math.abs(left-20*Math.log10(.45))<2,'mono meter measures downmix, not the original L or R');
+  assert.match(await limitedCamera.locator('#meterLabel').textContent(),/MONO/);
+  await limitedCamera.locator('#stereo').click();await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  await limitedCamera.waitForTimeout(600);
+  [left,right]=await levels();assert.ok(right-left>10,'stereo meters retain different left/right levels');
+  assert.match(await limitedCamera.locator('#meterLabel').textContent(),/STEREO/);
+  await limitedCamera.evaluate(()=>{window.meterTest.gain.gain.value=.6;window.meterTest.right.gain.value=0;});
+  await limitedCamera.waitForFunction(()=>Number(document.getElementById('meterL').getAttribute('aria-valuenow'))>-10&&Number(document.getElementById('meterR').getAttribute('aria-valuenow'))<-55);
+  await limitedCamera.evaluate(()=>{window.meterTest.gain.gain.value=0;window.meterTest.right.gain.value=.6;});
+  await limitedCamera.waitForFunction(()=>Number(document.getElementById('meterR').getAttribute('aria-valuenow'))>-10&&Number(document.getElementById('meterL').getAttribute('aria-valuenow'))<-55);
+  await limitedCamera.locator('#mono').click();await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  await limitedCamera.waitForTimeout(600);
+  [left,right]=await levels();assert.equal(left,right);assert.ok(Math.abs(left-20*Math.log10(.3))<2,'right-only signal contributes to both mono meter displays');
+  assert.equal(await limitedCamera.locator('#meterL .lit').count(),await limitedCamera.locator('#meterR .lit').count());
   await limitedCamera.evaluate(()=>window.meterTest.context.close());
+  console.log('PASS: post-mix mono L/R equality and correct downmix level; independent stereo L-only/R-only levels; mode switching.');
   await limitedCamera.setViewportSize({width:390,height:844});
   assert.equal(await limitedCamera.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   console.log('PASS: automatic 1080p to 720p connection and encoded recording; actual quality synchronization; green/yellow/red LEDs respond to signal strength.');
