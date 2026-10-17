@@ -12,7 +12,7 @@ try{
   let ready=false;for(let i=0;i<50;i++){try{if((await fetch('http://127.0.0.1:8767')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,100));}assert.ok(ready);
   browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream',`--use-file-for-fake-audio-capture=${audioFile}`]});
   const errors=[],requests=[];
-  async function open(setup){const page=await browser.newPage({acceptDownloads:true});page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>requests.push(r.url()));if(setup)await page.addInitScript(setup);await page.goto('http://127.0.0.1:8767');return page;}
+  async function open(setup){const page=await browser.newPage({acceptDownloads:true});page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>requests.push(r.url()));if(setup)await page.addInitScript(setup);await page.goto('http://127.0.0.1:8767');await page.locator('#storageMode').selectOption('memory');return page;}
   async function connect(page){await page.locator('#connectButton').click();await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);}
   async function record(page){await page.locator('#recordButton').click();await page.waitForFunction(()=>document.getElementById('recordState').textContent==='録画中');await page.waitForTimeout(1300);await page.locator('#pauseButton').click();await page.waitForTimeout(400);await page.locator('#pauseButton').click();await page.waitForTimeout(800);await page.locator('#recordButton').click();}
   async function check(page,file,channels,height){

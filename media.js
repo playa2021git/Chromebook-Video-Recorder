@@ -58,3 +58,10 @@ export function recordingPlans(isSupported, target = 'mp4') {
     ...webm.map(mimeType => ({ mimeType, format: 'webm', needsConversion: target === 'mp4', copyVideo: false, codecLabel: 'WebM / Opus' }))
   ].filter(plan => isSupported(plan.mimeType));
 }
+
+export function directRecordingPlans(isSupported, target = 'mp4') {
+  // No automatic whole-file conversion or container substitution in disk mode.
+  return recordingPlans(isSupported, target).filter(plan => plan.format === target).map(plan => ({
+    ...plan, compatibilityConversion: plan.needsConversion, needsConversion: false
+  }));
+}

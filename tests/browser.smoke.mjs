@@ -32,6 +32,7 @@ try {
   const page = await browser.newPage({viewport:{width:1440,height:1000},acceptDownloads:true});
   const errors = []; page.on('pageerror',error=>errors.push(error.message));
   await page.goto('http://127.0.0.1:8765');
+  await page.locator('#storageMode').selectOption('memory');
   await page.locator('#videoFormat').selectOption('webm');
   await page.locator('#connectButton').click();
   await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);
@@ -96,6 +97,7 @@ try {
     };
   });
   await audioPage.goto('http://127.0.0.1:8765');
+  await audioPage.locator('#storageMode').selectOption('memory');
   await audioPage.locator('#audioMode').click(); await audioPage.locator('#connectButton').click();
   await audioPage.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   assert.equal(await audioPage.locator('#videoSettings').isVisible(),false);
@@ -163,7 +165,7 @@ try {
   assert.ok(await switching.evaluate(()=>window.previousCamera.getTracks().every(track=>track.readyState==='ended')));
   const brokenEncoder=await browser.newPage();
   await brokenEncoder.route('**/mp3-worker.js',route=>route.abort());
-  await brokenEncoder.goto('http://127.0.0.1:8765'); await brokenEncoder.locator('#audioMode').click(); await brokenEncoder.locator('#connectButton').click();
+  await brokenEncoder.goto('http://127.0.0.1:8765'); await brokenEncoder.locator('#storageMode').selectOption('memory'); await brokenEncoder.locator('#audioMode').click(); await brokenEncoder.locator('#connectButton').click();
   await brokenEncoder.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   await brokenEncoder.locator('#recordButton').click();
   await brokenEncoder.waitForFunction(()=>document.getElementById('notice').textContent.includes('MP3 エンコーダーを読み込めません'));
@@ -194,7 +196,7 @@ try {
       return original(constraints);
     };
   });
-  await limitedCamera.goto('http://127.0.0.1:8765');await limitedCamera.locator('#videoFormat').selectOption('webm');await limitedCamera.locator('#connectButton').click();
+  await limitedCamera.goto('http://127.0.0.1:8765');await limitedCamera.locator('#storageMode').selectOption('memory');await limitedCamera.locator('#videoFormat').selectOption('webm');await limitedCamera.locator('#connectButton').click();
   await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   assert.deepEqual(await limitedCamera.evaluate(()=>window.requestedHeights),[1080,720]);
   assert.equal(await limitedCamera.locator('#quality').inputValue(),'1280x720');

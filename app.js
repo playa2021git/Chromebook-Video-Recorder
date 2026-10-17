@@ -1,4 +1,5 @@
-import { acquireMedia, peakDecibels, stereoReady, formatTime, recordingPlans, mediaError } from './media.js';
+import { acquireMedia, peakDecibels, stereoReady, formatTime, recordingPlans, directRecordingPlans, mediaError } from './media.js';
+import { DirectFileSink, formatBytes } from './file-sink.js';
 import { convertToMp4 } from './mp4.js';
 import { waitFor, stopStream } from './connection.js';
 import { Mp3Recorder } from './mp3-recorder.js';
@@ -6,11 +7,19 @@ const $ = id => document.getElementById(id);
 let sourceStream, outputStream, audioContext, audioBus, audioInput, audioDestination, splitter, meterNodes = [], meterFrame, recorder;
 let mode = 'stereo', captureType = 'video', busy = false, chunks = [], startedAt = 0, elapsed = 0, timerInterval, finishing = false;
 let recordingMeta, recordingError = false, disconnected = false;
-let connectionAttempt, conversionController, enumerationVersion = 0;
+let connectionAttempt, conversionController, fileSink, storagePaused = false, diskWriteError, enumerationVersion = 0;
 const takes = new Map();
 const controls = ['camera', 'microphone', 'quality'];
 const isAudioOnly = () => captureType === 'audio';
 const action = () => isAudioOnly() ? '録音' : '録画';
+const diskMode = () => $('storageMode').value === 'disk';
+function refreshStorageUI() {
+  const format = isAudioOnly() ? 'mp3' : $('videoFormat').value;
+  $('storageMode').options[0].textContent = `${action()}中に直接保存（おすすめ）`;
+  const nativePlan = !isAudioOnly() && window.MediaRecorder ? directRecordingPlans(type => MediaRecorder.isTypeSupported(type), format)[0] : undefined;
+  $('saveFormat').textContent = `${format.toUpperCase()} · ${diskMode() ? `${action()}中に直接保存` : '停止後に保存'}`;
+  $('storageHint').textContent = diskMode() ? (isAudioOnly() ? '開始時に MP3 の保存先を選択。録音中に順次書き込みます。' : !nativePlan ? 'この Chrome は選択した形式の直接保存に非対応です。WebM または停止後保存を選んでください。' : `開始時に保存先を選択。${nativePlan.codecLabel}${nativePlan.compatibilityConversion ? '。AAC 互換変換は停止後に任意で実行できます（短時間向け）' : ''}。録画中に順次書き込みます。`) : '動画全体をメモリに保持します。MP4 は必要に応じて停止後に H.264 / AAC へ変換します。短時間向けです。';
+}
 function notify(message, type = '') { $('notice').textContent = message; $('notice').className = `notice ${type}`; }
 function activeRecording() { return recorder && recorder.state !== 'inactive'; }
 function updateControls() {
@@ -40,6 +49,7 @@ function updateModeUI() {
   $('recordButton').innerHTML = `<span class="record-icon"></span>${action()}をはじめる`;
   $('recordState').textContent = `${action()}前`;
   $('timer').textContent = '00:00';
+  refreshStorageUI();
 }
 function detachPreview() {
   const preview = $('preview');
@@ -237,13 +247,48 @@ function updateTimer() {
 async function startRecording() {
   if (!sourceStream || !outputStream || busy || finishing || activeRecording()) return;
   if (mode === 'stereo' && !stereoReady(sourceStream.getAudioTracks()[0].getSettings())) return;
-  busy = true; updateControls();
+  busy = true; updateControls(); fileSink = undefined; storagePaused = false; diskWriteError = undefined;
+  const direct = diskMode();
+  const plans = isAudioOnly() ? [] : (direct ? directRecordingPlans : recordingPlans)(type => MediaRecorder.isTypeSupported(type), $('videoFormat').value);
   try {
-    await waitFor(audioContext.resume(), { timeout: 3000, label: '音声の開始' });
+    let picker;
+    if (direct) {
+      if (typeof window.showSaveFilePicker !== 'function') throw new Error('このブラウザは直接保存に非対応です。停止後保存を選んでください。');
+      if (!isAudioOnly() && !plans.length) throw new Error('この Chrome は選択した形式を直接録画できません。WebM または停止後保存を選んでください。');
+      const extension = isAudioOnly() ? 'mp3' : $('videoFormat').value;
+      const mime = isAudioOnly() ? 'audio/mpeg' : `video/${extension}`;
+      picker = window.showSaveFilePicker({ id: 'frame-recordings', startIn: 'downloads', suggestedName: `frame-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`, excludeAcceptAllOption: true, types: [{ description: `${extension.toUpperCase()} ファイル`, accept: { [mime]: [`.${extension}`] } }] });
+    }
+    const audioReady = audioContext.resume(); audioReady.catch(() => {});
+    if (picker) {
+      const handle = await picker;
+      fileSink = await DirectFileSink.create(handle, {
+        onProgress: bytes => { $('storageStatus').textContent = `保存中：${handle.name} · ${formatBytes(bytes)} 書き込み済み（停止後に確定）`; },
+        onBackpressure: blocked => {
+          if (!activeRecording() || finishing) return;
+          if (blocked && recorder.state === 'recording') {
+            elapsed += performance.now() - startedAt; recorder.pause(); storagePaused = true;
+            $('recordState').textContent = 'ストレージ待ち'; $('pauseButton').disabled = true; $('liveBadge').textContent = 'Ⅱ 保存待ち'; updateTimer();
+            notify('ストレージの書き込みを待っています。録画は一時停止し、書き込みが追いつくと自動で再開します。', 'warning');
+          } else if (!blocked && storagePaused && recorder.state === 'paused') {
+            storagePaused = false; recorder.resume(); startedAt = performance.now();
+            $('recordState').textContent = `${action()}中`; $('pauseButton').disabled = false; $('pauseButton').textContent = '一時停止'; $('liveBadge').textContent = '● REC';
+            notify('書き込みが追いついたため、収録を再開しました。');
+          }
+        },
+        onError: error => { diskWriteError = error; recordingError = true; if (activeRecording()) stopRecording(); }
+      });
+      $('storageStatus').hidden = false; $('storageStatus').classList.remove('error');
+      $('storageStatus').textContent = `保存先：${handle.name} · 停止後に保存を確定します。`;
+    } else $('storageStatus').hidden = true;
+    await waitFor(audioReady, { timeout: 3000, label: '音声の開始' });
     if (!sourceStream || sourceStream.getAudioTracks()[0].readyState !== 'live') throw new Error('マイクが切断されました。再接続してください。');
     chunks = []; elapsed = 0; recordingError = false;
     const bind = candidate => {
-      candidate.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      candidate.ondataavailable = event => {
+        if (!event.data.size) return;
+        if (fileSink) fileSink.enqueue(event.data); else chunks.push(event.data);
+      };
       candidate.onerror = () => { recordingError = true; notify('収録エラーが発生しました。停止後のファイルを確認し、保存できるデータを保存してください。', 'error'); if (activeRecording()) stopRecording(); };
       candidate.onstop = finishRecording;
     };
@@ -253,7 +298,7 @@ async function startRecording() {
       bind(recorder); recorder.start();
     } else {
       let started = false, lastError;
-      for (const candidatePlan of recordingPlans(type => MediaRecorder.isTypeSupported(type), $('videoFormat').value)) {
+      for (const candidatePlan of plans) {
         let candidate;
         try {
           candidate = new MediaRecorder(outputStream, { mimeType: candidatePlan.mimeType, videoBitsPerSecond: 8000000, audioBitsPerSecond: mode === 'stereo' ? 192000 : 128000 });
@@ -267,23 +312,26 @@ async function startRecording() {
       if (!started) throw lastError || new Error('このブラウザは動画録画に対応していません。最新の Chrome を使用してください。');
     }
     const video = sourceStream.getVideoTracks()[0]?.getSettings();
-    recordingMeta = { ...plan, captureType, width: video?.width, height: video?.height, channels: mode === 'stereo' ? 2 : 1, date: new Date() };
+    recordingMeta = { ...plan, direct, captureType, width: video?.width, height: video?.height, channels: mode === 'stereo' ? 2 : 1, date: new Date() };
     startedAt = performance.now();
     $('recordButton').innerHTML = `<span class="record-icon"></span>${action()}を停止する`;
     $('recordButton').classList.add('recording'); $('recordState').textContent = `${action()}中`;
     $('pauseButton').hidden = false; $('pauseButton').textContent = '一時停止';
     $('liveBadge').textContent = '● REC'; $('liveBadge').hidden = $('recordOverlay').hidden = false;
     timerInterval = setInterval(updateTimer, 250);
-    notify(`${action()}中です。長時間の収録はメモリを使用します。適度に停止して端末に保存してください。`);
+    if (direct) $('storageHint').textContent = `${isAudioOnly() ? 'MP3' : plan.codecLabel} で直接保存中。停止後に保存完了を確認してください。${plan.compatibilityConversion ? 'AAC への互換変換は停止後に任意で実行できます（短時間向け）。' : ''}`;
+    notify(direct ? `${action()}中です。選択したファイルへ順次書き込んでいます。停止後の「保存完了」を確認してください。` : `${action()}中です。動画全体をメモリに保持します。適度に停止して保存してください。`);
   } catch (error) {
+    if (activeRecording()) { recorder.onstop = recorder.ondataavailable = null; recorder.stop(); }
     recorder?.dispose?.();
-    notify(`${action()}を開始できませんでした。${error.message}`, 'error');
+    if (fileSink) { await fileSink.abort(); fileSink = undefined; }
+    notify(error.name === 'AbortError' ? '保存先の選択をキャンセルしました。収録は開始していません。' : `${action()}を開始できませんでした。${error.message}`, error.name === 'AbortError' ? '' : 'error');
   } finally { busy = false; updateControls(); }
 }
 function stopRecording() {
   if (!activeRecording()) return;
   if (recorder.state === 'recording') elapsed += performance.now() - startedAt;
-  finishing = true; recorder.stop();
+  finishing = true; storagePaused = false; recorder.stop();
   clearInterval(timerInterval); updateTimer(); updateControls();
   $('pauseButton').disabled = true; notify(`${action()}したファイルを準備しています…`);
 }
@@ -295,15 +343,32 @@ async function finishRecording() {
   $('recordButton').classList.remove('recording');
   $('recordButton').textContent = recordingMeta.needsConversion ? 'MP4 を準備中…' : 'ファイルを準備中…';
   $('recordState').textContent = recordingMeta.needsConversion ? 'MP4 変換中' : '保存準備中';
-  const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' }); chunks = [];
-  const outcome = blob.size ? await prepareTake(blob, recordingMeta, elapsed) : undefined;
+  let blob, outcome;
+  if (fileSink) {
+    const sink = fileSink;
+    try {
+      const file = await sink.finish();
+      blob = file.slice(0, file.size, recorder.mimeType || file.type);
+      if (!file.size) throw new Error('保存ファイルにデータがありません。');
+      addTake(blob, { ...recordingMeta, savedToDisk: true, savedFileName: sink.handle.name }, elapsed);
+      $('storageStatus').textContent = `保存完了：${sink.handle.name} · ${formatBytes(file.size)}`;
+      outcome = { message: recordingError ? '収録エラー前のデータをファイルに保存しました。再生して確認してください。' : '保存が完了しました。選択した場所にファイルが保存されています。', type: recordingError ? 'warning' : '' };
+    } catch (error) {
+      const message = error.committed ? 'ファイルへの保存は確定しましたが、再生用に読み込めませんでした。「ファイル」アプリで確認してください。' : `直接保存を完了できませんでした（${(diskWriteError || error).name}）。空き容量と保存先を確認してください。録画中の一時データは保存されていない場合があります。`;
+      $('storageStatus').classList.add('error'); $('storageStatus').textContent = message;
+      outcome = { message, type: 'error' };
+    } finally { fileSink = undefined; chunks = []; }
+  } else {
+    blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' }); chunks = [];
+    outcome = blob.size ? await prepareTake(blob, recordingMeta, elapsed) : undefined;
+  }
   finishing = false;
   $('recordButton').innerHTML = `<span class="record-icon"></span>${action()}をはじめる`;
   $('recordButton').classList.remove('recording'); $('recordState').textContent = `${action()}終了`;
   $('pauseButton').hidden = true; $('pauseButton').disabled = false;
   $('liveBadge').hidden = $('recordOverlay').hidden = true;
   if (disconnected) { stopDevices(); $('placeholder').hidden = false; }
-  if (outcome) notify(recordingError && !outcome.type ? `録画エラー前のデータを MP4 にしました。再生して映像・音声を確認してください。` : outcome.message, recordingError ? 'warning' : outcome.type);
+  if (outcome) notify(!recordingMeta.direct && recordingError && !outcome.type ? `録画エラー前のデータを MP4 にしました。再生して映像・音声を確認してください。` : outcome.message, outcome.type || (recordingError ? 'warning' : ''));
   else if (blob.size) notify(recordingError ? 'エラー発生前のファイルを残しました。再生して確認し、保存してください。' : `${action()}ができました。下で再生して確認し「端末に保存」を押してください。`, recordingError ? 'warning' : '');
   else notify('収録データがありません。デバイスの接続を確認して再収録してください。', 'error');
   updateControls();
@@ -316,7 +381,7 @@ async function prepareTake(blob, meta, duration) {
       signal: controller.signal, channels: meta.channels, copyVideo: meta.copyVideo, duration,
       onProgress: ({ stage, progress }) => notify(stage === 'loading' ? 'MP4 変換エンジンを読み込んでいます（初回は約 31 MB）。動画は端末の外へ送信しません。' : stage === 'complete' ? 'MP4 の準備ができました。' : `MP4 に変換しています… ${Math.floor(progress * 100)}%`)
     });
-    addTake(converted, { ...meta, format: 'mp4', needsConversion: false, unconverted: false, codecLabel: 'H.264 / AAC' }, duration);
+    addTake(converted, { ...meta, savedToDisk: false, savedFileName: undefined, compatibilityConversion: false, format: 'mp4', needsConversion: false, unconverted: false, codecLabel: 'H.264 / AAC' }, duration);
     return { message: 'MP4 の準備ができました。再生して確認し「端末に保存」を押してください。', type: '' };
   } catch (error) {
     addTake(blob, { ...meta, unconverted: true }, duration);
@@ -326,36 +391,37 @@ async function prepareTake(blob, meta, duration) {
 function addTake(blob, meta, duration) {
   const audioOnly = meta.captureType === 'audio';
   const url = URL.createObjectURL(blob), extension = meta.format || (audioOnly ? 'mp3' : 'webm');
-  const filename = `frame-${meta.date.toISOString().replace(/[:.]/g, '-')}.${extension}`;
+  const filename = meta.savedFileName || `frame-${meta.date.toISOString().replace(/[:.]/g, '-')}.${extension}`;
   const item = document.createElement('article'); item.className = 'take';
   const playback = document.createElement(audioOnly ? 'audio' : 'video');
   playback.controls = true; if (!audioOnly) playback.playsInline = true;
   playback.src = url; playback.preload = 'metadata';
   const info = document.createElement('div');
   const title = document.createElement('h3'); title.textContent = `${audioOnly ? '♫ 録音' : '▣ 動画'} · ${meta.date.toLocaleString('ja-JP')}`;
-  const details = document.createElement('p'); details.textContent = `${audioOnly ? 'MP3' : `${meta.width} × ${meta.height} · ${extension.toUpperCase()} · ${meta.codecLabel || ''}${meta.unconverted ? ' · 互換変換前' : ''}`} · ${meta.channels === 2 ? 'ステレオ' : 'モノラル'} · ${formatTime(duration / 1000)} · ${(blob.size / 1024 / 1024).toFixed(1)} MB`;
+  const details = document.createElement('p'); details.textContent = `${audioOnly ? 'MP3' : `${meta.width} × ${meta.height} · ${extension.toUpperCase()} · ${meta.codecLabel || ''}${meta.unconverted ? ' · 互換変換前' : ''}`} · ${meta.channels === 2 ? 'ステレオ' : 'モノラル'} · ${formatTime(duration / 1000)} · ${formatBytes(blob.size)}`;
   const actions = document.createElement('div'); actions.className = 'take-actions';
-  const save = document.createElement('a'); save.href = url; save.download = filename; save.textContent = meta.unconverted ? `↓ 元データを保存（${extension.toUpperCase()}）` : '↓ 端末に保存';
-  const saved = document.createElement('p'); saved.textContent = '未保存：端末に保存してください';
-  save.addEventListener('click', () => { saved.textContent = 'ダウンロードを開始しました。Chrome のダウンロード一覧で保存完了を確認してください。'; });
+  const save = document.createElement('a'); save.href = url; save.download = filename; save.textContent = meta.savedToDisk ? '↓ 保存済みファイルのコピー' : meta.unconverted ? `↓ 元データを保存（${extension.toUpperCase()}）` : '↓ 端末に保存';
+  const saved = document.createElement('p'); saved.textContent = meta.savedToDisk ? `保存済み：${meta.savedFileName}` : '未保存：端末に保存してください';
+  save.addEventListener('click', () => { saved.textContent = meta.savedToDisk ? `元ファイルは保存済み：${meta.savedFileName}。コピーのダウンロードを開始しました。` : 'ダウンロードを開始しました。Chrome のダウンロード一覧で保存完了を確認してください。'; });
   const remove = document.createElement('button'); remove.textContent = '削除';
   remove.addEventListener('click', () => {
-    if (!confirm('このページからファイルを削除します。端末に保存していないデータは復元できません。削除しますか？')) return;
+    if (!confirm(meta.savedToDisk ? '一覧から外します。保存したファイルは端末に残ります。' : 'このページからファイルを削除します。端末に保存していないデータは復元できません。削除しますか？')) return;
     playback.pause(); playback.removeAttribute('src'); playback.load(); URL.revokeObjectURL(url); takes.delete(url); item.remove();
     $('recordingsSection').hidden = !takes.size;
   });
   actions.append(save, remove);
-  if (meta.unconverted) {
-    const retry = document.createElement('button'); retry.className = 'convert-retry'; retry.textContent = 'MP4 に変換';
+  if (meta.unconverted || meta.compatibilityConversion) {
+    const retry = document.createElement('button'); retry.className = 'convert-retry'; retry.textContent = meta.savedToDisk ? 'AAC 互換 MP4 に変換（短時間向け）' : 'MP4 に変換';
     retry.addEventListener('click', async () => {
       if (busy || activeRecording() || finishing) return;
+      if (meta.savedToDisk && !confirm('この互換変換は動画全体をメモリに読み込みます。長時間の動画では失敗する場合があります。元の保存ファイルは変更しません。実行しますか？')) return;
       finishing = true; updateControls();
-      try { const outcome = await prepareTake(blob, meta, duration); if (outcome) notify(outcome.message, outcome.type); }
+      try { const outcome = await prepareTake(blob, { ...meta, needsConversion: true }, duration); if (outcome) notify(outcome.message, outcome.type); }
       finally { finishing = false; updateControls(); }
     });
     actions.append(retry);
   } info.append(title, details, actions, saved); item.append(playback, info);
-  $('recordingsList').prepend(item); $('recordingsSection').hidden = false; takes.set(url, blob);
+  $('recordingsList').prepend(item); $('recordingsSection').hidden = false; takes.set(url, { blob, savedToDisk: !!meta.savedToDisk });
 }
 $('connectButton').addEventListener('click', () => connect());
 $('reconnectButton').addEventListener('click', () => connect());
@@ -363,7 +429,9 @@ $('cancelConvertButton').addEventListener('click', () => conversionController?.a
 $('videoFormat').addEventListener('change', () => {
   $('saveFormat').textContent = `${$('videoFormat').value.toUpperCase()} 形式 · クラウド送信なし`;
   $('videoFormatLabel').textContent = `カメラ ＋ マイク · ${$('videoFormat').value.toUpperCase()}`;
+  refreshStorageUI();
 });
+$('storageMode').addEventListener('change', refreshStorageUI);
 $('cancelConnectButton').addEventListener('click', () => connectionAttempt?.abort(new DOMException('接続をキャンセルしました。', 'AbortError')));
 controls.forEach(id => $(id).addEventListener('change', () => { if (sourceStream) connect(id === 'microphone' ? 'audio' : 'video'); }));
 for (const type of ['video', 'audio']) $(`${type}Mode`).addEventListener('click', () => {
@@ -386,6 +454,10 @@ $('pauseButton').addEventListener('click', () => {
     elapsed += performance.now() - startedAt; recorder.pause();
     $('pauseButton').textContent = `${action()}を再開`; $('recordState').textContent = '一時停止'; $('liveBadge').textContent = 'Ⅱ PAUSED';
   } else if (recorder?.state === 'paused') {
+    if (fileSink?.blocked) {
+      storagePaused = true; $('pauseButton').disabled = true; $('recordState').textContent = 'ストレージ待ち';
+      notify('書き込みが追いつくと自動で再開します。', 'warning'); return;
+    }
     recorder.resume(); startedAt = performance.now();
     $('pauseButton').textContent = '一時停止'; $('recordState').textContent = `${action()}中`; $('liveBadge').textContent = '● REC';
   }
@@ -395,7 +467,12 @@ $('helpButton').addEventListener('click', () => $('helpDialog').showModal());
 $('closeHelp').addEventListener('click', () => $('helpDialog').close());
 navigator.mediaDevices?.addEventListener('devicechange', () => { if (!busy && !activeRecording() && !finishing) enumerateDevices().catch(() => {}); });
 window.addEventListener('beforeunload', event => {
-  if (activeRecording() || finishing || takes.size) { event.preventDefault(); event.returnValue = ''; }
+  if (activeRecording() || finishing || [...takes.values()].some(take => !take.savedToDisk)) { event.preventDefault(); event.returnValue = ''; }
 });
 window.addEventListener('pagehide', () => { conversionController?.abort(new DOMException('ページを閉じました。', 'AbortError'));  connectionAttempt?.abort(new DOMException('ページを閉じました。', 'AbortError'));  if (activeRecording()) recorder.stop(); stopDevices(); });
+if (typeof window.showSaveFilePicker !== 'function') {
+  $('storageMode').value = 'memory'; $('storageMode').options[0].disabled = true;
+  $('storageStatus').hidden = false; $('storageStatus').textContent = 'このブラウザは直接保存に非対応です。停止後保存（メモリ使用）で動作します。';
+}
+refreshStorageUI();
 if (!isSecureContext || !navigator.mediaDevices?.getUserMedia) notify('カメラ・マイクを使うには HTTPS（開発時は localhost）で、Chrome から開いてください。', 'error');

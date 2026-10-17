@@ -6,3 +6,5 @@ body.connected .control-bar{position:sticky}
 .connection-actions:has(#cancelConnectButton:not([hidden])),.connection-actions:has(#cancelConvertButton:not([hidden])){position:sticky;bottom:14px;z-index:6;justify-content:flex-end;pointer-events:none}.connection-actions button{pointer-events:auto}
 
 .meter-hint{font-size:13px;line-height:1.6;color:#a9b5d2;margin:10px 0}.meter-heading>span:last-child{font-size:12px}
+
+.storage-status{padding:13px 16px;border:1px solid #357c76;background:#0c2a30;color:#b1f4e4;font-size:15px;border-radius:7px;line-height:1.7;overflow-wrap:anywhere}.storage-status.error{border-color:#af4566;background:#301522;color:#ffb3c7}
