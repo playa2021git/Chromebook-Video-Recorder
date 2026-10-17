@@ -32,6 +32,7 @@ try {
   const page = await browser.newPage({viewport:{width:1440,height:1000},acceptDownloads:true});
   const errors = []; page.on('pageerror',error=>errors.push(error.message));
   await page.goto('http://127.0.0.1:8765');
+  await page.locator('#videoFormat').selectOption('webm');
   await page.locator('#connectButton').click();
   await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   assert.match(await page.locator('#actualVideo').textContent(), /1920 × 1080/);
@@ -193,7 +194,7 @@ try {
       return original(constraints);
     };
   });
-  await limitedCamera.goto('http://127.0.0.1:8765');await limitedCamera.locator('#connectButton').click();
+  await limitedCamera.goto('http://127.0.0.1:8765');await limitedCamera.locator('#videoFormat').selectOption('webm');await limitedCamera.locator('#connectButton').click();
   await limitedCamera.waitForFunction(()=>!document.getElementById('recordButton').disabled);
   assert.deepEqual(await limitedCamera.evaluate(()=>window.requestedHeights),[1080,720]);
   assert.equal(await limitedCamera.locator('#quality').inputValue(),'1280x720');

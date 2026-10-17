@@ -3,6 +3,6 @@
 body.connected .control-bar{position:sticky}
 .video-area:has(#placeholder:not([hidden])),.video-area:has(#audioPreview:not([hidden])){aspect-ratio:auto;min-height:400px}
 .connection-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}.connection-actions:has(button:not([hidden])){margin-bottom:8px}
-.connection-actions:has(#cancelConnectButton:not([hidden])){position:sticky;bottom:14px;z-index:6;justify-content:flex-end;pointer-events:none}.connection-actions button{pointer-events:auto}
+.connection-actions:has(#cancelConnectButton:not([hidden])),.connection-actions:has(#cancelConvertButton:not([hidden])){position:sticky;bottom:14px;z-index:6;justify-content:flex-end;pointer-events:none}.connection-actions button{pointer-events:auto}
 
 .meter-hint{font-size:13px;line-height:1.6;color:#a9b5d2;margin:10px 0}.meter-heading>span:last-child{font-size:12px}

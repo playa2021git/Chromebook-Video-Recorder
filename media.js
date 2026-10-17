@@ -47,3 +47,14 @@ export function peakDecibels(samples) {
   for (const sample of samples) peak = Math.max(peak, Math.abs(sample));
   return peak ? Math.min(0, Math.max(-60, 20 * Math.log10(peak))) : -60;
 }
+
+export function recordingPlans(isSupported, target = 'mp4') {
+  const webm = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  const aac = ['video/mp4;codecs=avc1.424028,mp4a.40.2', 'video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2'];
+  const avc = ['video/mp4;codecs=avc1.424028,opus', 'video/mp4;codecs=avc1,opus'];
+  return [
+    ...(target === 'mp4' ? aac.map(mimeType => ({ mimeType, format: 'mp4', needsConversion: false, copyVideo: true, codecLabel: 'H.264 / AAC' })) : []),
+    ...(target === 'mp4' ? avc.map(mimeType => ({ mimeType, format: 'mp4', needsConversion: true, copyVideo: true, codecLabel: 'H.264 / Opus（元データ）' })) : []),
+    ...webm.map(mimeType => ({ mimeType, format: 'webm', needsConversion: target === 'mp4', copyVideo: false, codecLabel: 'WebM / Opus' }))
+  ].filter(plan => isSupported(plan.mimeType));
+}

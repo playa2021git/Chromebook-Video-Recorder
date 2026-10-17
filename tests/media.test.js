@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {acquireMedia, peakDecibels, captureConstraints, stereoReady, formatTime, selectMime, mediaError} from '../media.js';
+import {recordingPlans, acquireMedia, peakDecibels, captureConstraints, stereoReady, formatTime, selectMime, mediaError} from '../media.js';
 test('希望解像度と選択デバイスを指定し、音声処理を無効にする', () => {
   const {video, audio} = captureConstraints('usb-camera', 'usb-mic', '1920x1080', 'stereo');
   assert.deepEqual(video.width, {ideal:1920}); assert.deepEqual(video.height, {ideal:1080});
@@ -86,4 +86,18 @@ test('初回はFrontを優先し、解像度交渉で返った720pをそのま�
   let calls=0;
   const result=await acquireMedia(async()=>{calls++;return {getVideoTracks:()=>[{getSettings:()=>({width:1280,height:720})}]};},'','','1920x1080','mono');
   assert.equal(calls,1); assert.equal(result.quality,'1280x720');
+});
+
+test('MP4はH.264/AACを優先し、H.264/OpusとWebMは実変換を要求する',()=>{
+  const all=recordingPlans(()=>true);
+  assert.match(all[0].mimeType,/mp4a/);assert.equal(all[0].needsConversion,false);
+  const opus=recordingPlans(t=>t.includes('opus')&&t.startsWith('video/mp4'));
+  assert.equal(opus[0].needsConversion,true);assert.equal(opus[0].copyVideo,true);
+  const webm=recordingPlans(t=>t.startsWith('video/webm'));
+  assert.equal(webm[0].needsConversion,true);assert.equal(webm[0].copyVideo,false);
+  assert.deepEqual(recordingPlans(()=>false),[]);
+});
+test('WebM選択時は変換せず、MP4と混同しない',()=>{
+  const plans=recordingPlans(()=>true,'webm');
+  assert.ok(plans.every(p=>p.format==='webm'&&!p.needsConversion));
 });
