@@ -1,0 +1,52 @@
+import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const dir = mkdtempSync(join(tmpdir(), 'frame-guide-'));
+const fixture = join(dir, 'camera.y4m');
+execFileSync('ffmpeg', ['-v','error','-f','lavfi','-i','color=c=0x202020:s=640x480:r=30','-t','3','-pix_fmt','yuv420p',fixture]);
+const server = spawn('python3',['-m','http.server','8769','--bind','127.0.0.1'],{cwd:new URL('../',import.meta.url).pathname,stdio:'ignore'});
+let browser;
+try {
+  for(let i=0;i<50;i++){try{if((await fetch('http://127.0.0.1:8769')).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
+  browser = await chromium.launch({executablePath:'/usr/bin/chromium',headless:true,args:['--no-sandbox','--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream',`--use-file-for-fake-video-capture=${fixture}`]});
+  const page = await browser.newPage();
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto('http://127.0.0.1:8769');
+  await page.locator('#guideButton').click();
+  assert.equal(await page.locator('#levelGuide').isVisible(),false);
+  await page.locator('#mono').click();
+  await page.locator('#storageMode').selectOption('memory');
+  await page.locator('#videoFormat').selectOption('webm');
+  await page.locator('#connectButton').click();
+  await page.waitForFunction(()=>!document.getElementById('recordButton').disabled);
+  assert.equal(await page.locator('#levelGuide').isVisible(),true);
+  await page.evaluate(()=>{window.track=document.getElementById('preview').srcObject.getVideoTracks()[0];});
+  const bounds=await page.locator('#levelGuide').boundingBox();
+  assert.ok(Math.abs(bounds.width/bounds.height-4/3)<0.01,'guide fits actual 4:3 video');
+  await page.setViewportSize({width:500,height:900});
+  await page.waitForTimeout(100);
+  const narrow=await page.locator('#levelGuide').boundingBox();
+  assert.ok(Math.abs(narrow.width/narrow.height-4/3)<0.01,'guide resizes with video');
+  await page.locator('#recordButton').click();
+  await page.locator('#guideButton').click();
+  assert.equal(await page.locator('#levelGuide').isVisible(),false);
+  await page.locator('#guideButton').click();
+  assert.equal(await page.locator('#levelGuide').isVisible(),true);
+  assert.equal(await page.evaluate(()=>window.track===document.getElementById('preview').srcObject.getVideoTracks()[0]),true);
+  await page.waitForTimeout(1300);
+  await page.locator('#recordButton').click();
+  const downloading=page.waitForEvent('download');
+  await page.getByRole('link',{name:'端末に保存'}).first().click();
+  const file=join(dir,'recording.webm');await (await downloading).saveAs(file);
+  // Every pixel of the recorded solid-gray frame stays gray, including both guide axes.
+  const pixels=execFileSync('ffmpeg',['-v','error','-i',file,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','pipe:1'],{maxBuffer:20*1024*1024});
+  for(let i=0;i<pixels.length;i++)assert.ok(Math.abs(pixels[i]-32)<=5,`saved pixel ${i} contains no guide`);
+  await page.locator('#audioMode').click();
+  assert.equal(await page.locator('#guideToolbar').isVisible(),false);
+  assert.equal(await page.locator('#levelGuide').isVisible(),false);
+  assert.deepEqual(errors,[]);
+  console.log('PASS: preview-only crosshair; resize; toggle during recording; unchanged camera track; saved video contains no lines; hidden in audio mode.');
+} finally {await browser?.close();server.kill();rmSync(dir,{recursive:true,force:true});}

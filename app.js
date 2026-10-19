@@ -9,6 +9,28 @@ let mode = 'stereo', captureType = 'video', busy = false, chunks = [], startedAt
 let recordingMeta, recordingError = false, disconnected = false;
 let connectionAttempt, conversionController, fileSink, storagePaused = false, diskWriteError, enumerationVersion = 0;
 const takes = new Map();
+// DOM-only alignment guide: never drawn into, or added to, the recording stream.
+let guideEnabled = false;
+function updateGuide() {
+  const video = $('preview'), area = video.parentElement;
+  const visible = guideEnabled && !isAudioOnly() && !!sourceStream?.getVideoTracks().some(track => track.readyState === 'live') && !!video.videoWidth;
+  $('guideToolbar').hidden = isAudioOnly();
+  $('levelGuide').hidden = !visible;
+  if (!visible) return;
+  const scale = Math.min(area.clientWidth / video.videoWidth, area.clientHeight / video.videoHeight);
+  $('levelGuide').style.width = `${video.videoWidth * scale}px`;
+  $('levelGuide').style.height = `${video.videoHeight * scale}px`;
+}
+$('guideButton').addEventListener('click', () => {
+  guideEnabled = !guideEnabled;
+  $('guideButton').setAttribute('aria-pressed', String(guideEnabled));
+  $('guideButton').textContent = `＋ 十字ガイド：${guideEnabled ? 'ON' : 'OFF'}`;
+  updateGuide();
+});
+$('preview').addEventListener('loadedmetadata', updateGuide);
+$('preview').addEventListener('resize', updateGuide);
+new ResizeObserver(updateGuide).observe($('preview').parentElement);
+
 const controls = ['camera', 'microphone', 'quality'];
 const isAudioOnly = () => captureType === 'audio';
 const action = () => isAudioOnly() ? '録音' : '録画';
@@ -50,6 +72,7 @@ function updateModeUI() {
   $('recordState').textContent = `${action()}前`;
   $('timer').textContent = '00:00';
   refreshStorageUI();
+  updateGuide();
 }
 function detachPreview() {
   const preview = $('preview');
@@ -69,6 +92,7 @@ function stopDevices() {
   detachPreview();
   stopStream(sourceStream); stopStream(outputStream);
   sourceStream = outputStream = undefined;
+  updateGuide();
   stopAudioGraph();
   if (audioContext) audioContext.close().catch(() => {});
   audioContext = undefined;
@@ -208,6 +232,7 @@ async function connect(reason = 'all') {
       await waitFor($('preview').play(), { signal, timeout: 5000, label: '映像の開始' });
     }
     $('placeholder').hidden = true; document.body.classList.add('connected');
+    updateGuide();
     $('audioPreview').hidden = !isAudioOnly();
     $('previewStatus').textContent = isAudioOnly() ? '● マイク接続中 · カメラ不使用' : '● プレビュー中';
     $('actualVideo').textContent = isAudioOnly() ? '映像：使用しません' : `映像：${videoSettings.width} × ${videoSettings.height} · ${Math.round(videoSettings.frameRate || 0)} fps`;
