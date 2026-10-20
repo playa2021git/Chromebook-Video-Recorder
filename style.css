@@ -19,3 +19,5 @@ body.connected .control-bar{position:sticky}
 .guide-toolbar button[aria-pressed="true"]{color:#7ffff4;border-color:#7ffff4;background:#103b40}
 .guide-toolbar button:focus-visible{outline:3px solid #ed85ff;outline-offset:3px}
 .guide-toolbar>span{font-size:14px;color:#b6c5d8}
+
+.wake-status{margin:14px 0;padding:14px 18px;border:1px solid #57d9be;border-radius:12px;background:#10312d;color:#acffe2;font-size:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.wake-status small{display:block;width:100%;color:#bdcbd8;font-size:14px}.wake-status.warning{border-color:#ffc857;background:#352a15;color:#ffe2a0}

@@ -1,9 +1,26 @@
+import { RecordingWakeLock } from './wake-lock.js';
 import { acquireMedia, peakDecibels, stereoReady, formatTime, recordingPlans, directRecordingPlans, mediaError } from './media.js';
 import { DirectFileSink, formatBytes } from './file-sink.js';
 import { convertToMp4 } from './mp4.js';
 import { waitFor, stopStream } from './connection.js';
 import { Mp3Recorder } from './mp3-recorder.js';
 const $ = id => document.getElementById(id);
+const recordingWakeLock = new RecordingWakeLock({ onStatus: state => {
+  const messages = {
+    requesting: 'スリープ防止を開始しています…',
+    held: '● スリープ防止中 · この画面を開いたまま収録してください',
+    hidden: '⚠ 画面が非表示のためスリープ防止を維持できません。この画面に戻ってください。',
+    unsupported: '⚠ このブラウザはスリープ防止に非対応です。端末の設定で自動スリープを無効にしてください。',
+    failed: '⚠ スリープ防止を有効にできません。再試行するか、端末の設定で自動スリープを無効にしてください。',
+    released: '⚠ スリープ防止が解除されました。再試行するか、端末の設定で自動スリープを無効にしてください。'
+  };
+  $('wakeStatus').hidden = state === 'idle';
+  $('wakeMessage').textContent = messages[state] || '';
+  $('wakeStatus').classList.toggle('warning', !['held', 'requesting', 'idle'].includes(state));
+  $('retryWakeLock').hidden = !['failed', 'released'].includes(state);
+} });
+$('retryWakeLock').addEventListener('click', () => recordingWakeLock.acquire());
+
 let sourceStream, outputStream, audioContext, audioBus, audioInput, audioDestination, splitter, meterNodes = [], meterFrame, recorder;
 let mode = 'stereo', captureType = 'video', busy = false, chunks = [], startedAt = 0, elapsed = 0, timerInterval, finishing = false;
 let recordingMeta, recordingError = false, disconnected = false;
@@ -338,6 +355,7 @@ async function startRecording() {
     }
     const video = sourceStream.getVideoTracks()[0]?.getSettings();
     recordingMeta = { ...plan, direct, captureType, width: video?.width, height: video?.height, channels: mode === 'stereo' ? 2 : 1, date: new Date() };
+    recordingWakeLock.start();
     startedAt = performance.now();
     $('recordButton').innerHTML = `<span class="record-icon"></span>${action()}を停止する`;
     $('recordButton').classList.add('recording'); $('recordState').textContent = `${action()}中`;
@@ -347,6 +365,7 @@ async function startRecording() {
     if (direct) $('storageHint').textContent = `${isAudioOnly() ? 'MP3' : plan.codecLabel} で直接保存中。停止後に保存完了を確認してください。${plan.compatibilityConversion ? 'AAC への互換変換は停止後に任意で実行できます（短時間向け）。' : ''}`;
     notify(direct ? `${action()}中です。選択したファイルへ順次書き込んでいます。停止後の「保存完了」を確認してください。` : `${action()}中です。動画全体をメモリに保持します。適度に停止して保存してください。`);
   } catch (error) {
+    recordingWakeLock.stop();
     if (activeRecording()) { recorder.onstop = recorder.ondataavailable = null; recorder.stop(); }
     recorder?.dispose?.();
     if (fileSink) { await fileSink.abort(); fileSink = undefined; }
@@ -388,6 +407,7 @@ async function finishRecording() {
     outcome = blob.size ? await prepareTake(blob, recordingMeta, elapsed) : undefined;
   }
   finishing = false;
+  recordingWakeLock.stop();
   $('recordButton').innerHTML = `<span class="record-icon"></span>${action()}をはじめる`;
   $('recordButton').classList.remove('recording'); $('recordState').textContent = `${action()}終了`;
   $('pauseButton').hidden = true; $('pauseButton').disabled = false;
@@ -494,7 +514,7 @@ navigator.mediaDevices?.addEventListener('devicechange', () => { if (!busy && !a
 window.addEventListener('beforeunload', event => {
   if (activeRecording() || finishing || [...takes.values()].some(take => !take.savedToDisk)) { event.preventDefault(); event.returnValue = ''; }
 });
-window.addEventListener('pagehide', () => { conversionController?.abort(new DOMException('ページを閉じました。', 'AbortError'));  connectionAttempt?.abort(new DOMException('ページを閉じました。', 'AbortError'));  if (activeRecording()) recorder.stop(); stopDevices(); });
+window.addEventListener('pagehide', () => { recordingWakeLock.stop(); conversionController?.abort(new DOMException('ページを閉じました。', 'AbortError'));  connectionAttempt?.abort(new DOMException('ページを閉じました。', 'AbortError'));  if (activeRecording()) recorder.stop(); stopDevices(); });
 if (typeof window.showSaveFilePicker !== 'function') {
   $('storageMode').value = 'memory'; $('storageMode').options[0].disabled = true;
   $('storageStatus').hidden = false; $('storageStatus').textContent = 'このブラウザは直接保存に非対応です。停止後保存（メモリ使用）で動作します。';

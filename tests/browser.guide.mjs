@@ -31,6 +31,7 @@ try {
   const narrow=await page.locator('#levelGuide').boundingBox();
   assert.ok(Math.abs(narrow.width/narrow.height-4/3)<0.01,'guide resizes with video');
   await page.locator('#recordButton').click();
+  assert.equal(await page.locator('#wakeStatus').isVisible(),true,'recording requests sleep prevention');
   await page.locator('#guideButton').click();
   assert.equal(await page.locator('#levelGuide').isVisible(),false);
   await page.locator('#guideButton').click();
@@ -40,6 +41,7 @@ try {
   await page.locator('#recordButton').click();
   const downloading=page.waitForEvent('download');
   await page.getByRole('link',{name:'端末に保存'}).first().click();
+  await page.waitForFunction(()=>document.getElementById('wakeStatus').hidden);
   const file=join(dir,'recording.webm');await (await downloading).saveAs(file);
   // Every pixel of the recorded solid-gray frame stays gray, including both guide axes.
   const pixels=execFileSync('ffmpeg',['-v','error','-i',file,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','pipe:1'],{maxBuffer:20*1024*1024});
