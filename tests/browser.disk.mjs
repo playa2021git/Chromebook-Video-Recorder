@@ -28,7 +28,7 @@ try{
             if(window.failWrite)throw new DOMException('Disk full','QuotaExceededError');
             if(window.holdWrite)await new Promise(resolve=>{window.releaseWrite=()=>{window.holdWrite=false;resolve();};});
             await writer.write(data);window.writtenBytes+=data.size;
-          },close:async()=>{await writer.close();window.closeCount++;},abort:()=>writer.abort()};
+          },close:async()=>{if(window.failClose)throw new DOMException('Disk full at commit','QuotaExceededError');await writer.close();window.closeCount++;},abort:()=>writer.abort()};
         }};
       };
     });
@@ -50,6 +50,18 @@ try{
   assert.ok(await p.evaluate(async()=>{const file=await window.targets.at(-1).getFile();return file.size>0&&new TextDecoder().decode((await file.arrayBuffer()).slice(4,8))==='ftyp';}));
   const probe=await download(p,'direct.mp4');assert.equal(probe.streams.find(s=>s.codec_type==='video').codec_name,'h264');assert.equal(probe.streams.find(s=>s.codec_type==='audio').channels,2);
   assert.ok(await p.evaluate(()=>{const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return !event.defaultPrevented;}),'already saved file does not produce an unsaved warning');
+  // Exercise the planned 18 takes with the same connected 1080p camera.
+  for(let take=1;take<18;take++){
+    const bytes=await p.evaluate(()=>window.writtenBytes);
+    await p.locator('#recordButton').click();
+    await p.waitForFunction(previous=>window.writtenBytes>previous,bytes);
+    await stop(p);
+    assert.match(await p.locator('#storageStatus').textContent(),/保存完了/);
+    assert.equal(await p.locator('.take').count(),take+1);
+    assert.match(await p.locator('#actualVideo').textContent(),/1920 × 1080/);
+  }
+  assert.equal(await p.evaluate(()=>window.closeCount),18);
+  console.log('PASS: 18 consecutive 1080p direct recordings each commit without pressing copy; camera remains connected.');
   const size=await p.evaluate(async()=>(await window.targets[0].getFile()).size);
   await p.locator('#audioMode').click();await connect(p);await p.locator('#recordButton').click();await p.waitForFunction(()=>document.getElementById('recordState').textContent==='録音中');
   const before=await p.evaluate(()=>window.writtenBytes);await p.waitForFunction(previous=>window.writtenBytes>previous,before);await stop(p);
@@ -70,6 +82,17 @@ try{
   await fail.waitForFunction(()=>!document.getElementById('recordButton').disabled);assert.equal(await fail.locator('.take').count(),0);assert.equal(await fail.evaluate(()=>window.closeCount),0);
   await fail.evaluate(()=>{window.failWrite=false;});await fail.locator('#recordButton').click();await fail.waitForFunction(()=>window.writtenBytes>0);await stop(fail);assert.match(await fail.locator('#storageStatus').textContent(),/保存完了/);await fail.close();
   console.log('PASS: write failure stops capture, does not claim saved or silently use RAM, next recording recovers.');
+
+  const commitFail=await open();await connect(commitFail);
+  await commitFail.evaluate(()=>{window.failClose=true;});
+  await commitFail.locator('#recordButton').click();await commitFail.waitForFunction(()=>window.writtenBytes>0);await stop(commitFail);
+  assert.match(await commitFail.locator('#storageStatus').textContent(),/QuotaExceededError/);
+  assert.equal(await commitFail.locator('.take').count(),0);assert.equal(await commitFail.evaluate(()=>window.closeCount),0);
+  await commitFail.evaluate(()=>{window.failClose=false;});
+  await commitFail.locator('#recordButton').click();await commitFail.waitForFunction(()=>window.closeCount===0&&window.targets.length===2);
+  await commitFail.waitForTimeout(1200);await stop(commitFail);
+  assert.match(await commitFail.locator('#storageStatus').textContent(),/保存完了/);await commitFail.close();
+  console.log('PASS: disk full at final commit is reported as failure, no saved take is shown, next recording recovers.');
 
   const unsupported=await open(()=>{const original=MediaRecorder.isTypeSupported.bind(MediaRecorder);MediaRecorder.isTypeSupported=t=>!t.startsWith('video/mp4')&&original(t);});
   await connect(unsupported);await unsupported.locator('#recordButton').click();await unsupported.waitForFunction(()=>document.getElementById('notice').textContent.includes('直接録画できません'));
